@@ -11,7 +11,10 @@
 // skill so users never have to expose backend creds. This is the implementation.
 
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join, relative } from "node:path";
+import { scanRepo } from "./checks/secrets.js";
+import { normalizeFinding } from "./contract.js";
 
 const SEVERITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
 
@@ -90,11 +93,13 @@ export function staticScan(root) {
     sourceFiles: 0,
     migrationFiles: 0,
     rootDir: root,
+    files: [],
   };
 
   for (const file of files) {
     const content = readSafe(file);
     if (!content) continue;
+    findings.files.push({ path: file, content });
     const lower = file.toLowerCase();
     const isSql = lower.endsWith(".sql");
     const isEnv = lower.includes(".env");
@@ -236,6 +241,51 @@ async function probeRpc(projectUrl, anonKey, fn) {
   }
 }
 
+// Get git-tracked files from the repo root (for .gitignore-aware suppression).
+// Returns [] if not a git repo / git unavailable / timeout.
+function gitTrackedFiles(root) {
+  try {
+    const out = execSync("git ls-files", { cwd: root, encoding: "utf8", timeout: 5000 });
+    return out.split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// --- Entry 40: RLS query without tenant filter (repo scan, best-effort) ---
+// Static heuristic: find .from('table').select(...) calls targeting an
+// RLS-enabled + policied table that carry NO .eq('tenant_col', ...) in the
+// same call chain. Flags reliance on RLS alone (no app-level filter).
+// Cannot see runtime queries — only literal .from().select() chains in source.
+export function findMissingTenantFilter(content, tenantTables) {
+  if (!content || typeof content !== "string") return [];
+  const findings = [];
+  const tenantSet = new Set(tenantTables || []);
+  if (tenantSet.size === 0) return [];
+
+  const tablePattern = /\.from\(\s*['"`]([a-zA-Z_][a-zA-Z0-9_]*)['"`]\s*\)/g;
+  let match;
+  while ((match = tablePattern.exec(content)) !== null) {
+    const tableName = match[1];
+    if (!tenantSet.has(tableName)) continue;
+
+    // Look ahead ~500 chars from end of .from() call for a .eq() filter
+    const after = content.slice(match.index + match[0].length, match.index + match[0].length + 500);
+    if (!/\.eq\s*\(/.test(after)) {
+      findings.push({
+        check: "rls_query_without_tenant_filter",
+        severity: "low",
+        title: `Query on RLS table \`${tableName}\` lacks a tenant filter (.eq)`,
+        explain: "Static heuristic: a .from('table').select() chain on an RLS+policies table has no .eq('col', val) filter in the same chain. RLS alone protects the data, but the query also needs an app-level tenant filter for row-level pruning. This is inferred (static) — review the actual query chain.",
+        target: tableName,
+        fix_sql: `-- Add a tenant filter to the query chain:\n-- supabase.from('${tableName}').select('*').eq('tenant_col', tenantId)`,
+        details: { heuristic: "no .eq() found in 500-char window after .from()", table_name: tableName },
+      });
+    }
+  }
+  return findings;
+}
+
 export async function discover({ root = process.cwd(), projectUrl = null, anonKey = null } = {}) {
   const scan = staticScan(root);
 
@@ -243,6 +293,19 @@ export async function discover({ root = process.cwd(), projectUrl = null, anonKe
   const effectiveKey = anonKey || scan.anonKey;
 
   const findings = [];
+
+  // --- Secret scanning (entry 16) ---
+  // Static scan of tracked source files for committed secrets. Uses
+  // scanRepo from checks/secrets.js which applies git-tracking suppression.
+  const tracked = gitTrackedFiles(root);
+  const filesForScan = scan.files.map((f) => ({
+    path: relative(root, f.path),
+    content: f.content,
+  }));
+  const secretScan = scanRepo(filesForScan, { trackedPaths: tracked });
+  for (const sf of secretScan.findings) {
+    findings.push(normalizeFinding(sf));
+  }
 
   // Static-only finding: service_role key in .env files
   if (scan.serviceRoleKeyLeak) {
@@ -284,6 +347,16 @@ export async function discover({ root = process.cwd(), projectUrl = null, anonKe
         target: t,
         fix_sql: `-- Define the access policy you want, or drop RLS:\n-- CREATE POLICY "${t}_read_all" ON public.${t} FOR SELECT USING (true);`,
       });
+    }
+  }
+
+  // Entry 40: RLS query without tenant filter (repo scan, best-effort heuristic).
+  // Tenant tables = RLS-enabled AND has policies. Scan source files for
+  // .from('table').select() chains with no .eq() filter.
+  const tenantTables = [...new Set(scan.rlsEnabledTables.filter((t) => scan.policiedTables.includes(t)))];
+  for (const f of scan.files) {
+    for (const mf of findMissingTenantFilter(f.content, tenantTables)) {
+      findings.push({ ...mf, target: `${f.path}: ${mf.target}` });
     }
   }
 
@@ -366,7 +439,7 @@ export async function discover({ root = process.cwd(), projectUrl = null, anonKe
     project_ref: scan.projectRef,
     project_url: effectiveUrl,
     has_anon_key: !!effectiveKey,
-    files_scanned: { source: scan.sourceFiles, migrations: scan.migrationFiles },
+    files_scanned: { source: scan.sourceFiles, migrations: scan.migrationFiles, total: scan.files.length },
     references_found: {
       tables: scan.tables,
       rpcs: scan.rpcs,
@@ -374,6 +447,13 @@ export async function discover({ root = process.cwd(), projectUrl = null, anonKe
       migrations_created: scan.createdTables,
       migrations_rls_enabled: scan.rlsEnabledTables,
       migrations_with_policies: scan.policiedTables,
+    },
+    secret_scan: {
+      files_scanned: scan.files.length,
+      tracked_paths: tracked.length,
+      context: secretScan.context,
+      finding_count: secretScan.findings.filter((f) => !f.suppressed).length,
+      suppressed_count: secretScan.findings.filter((f) => f.suppressed).length,
     },
     probes,
     summary,

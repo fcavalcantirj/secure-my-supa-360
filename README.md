@@ -119,6 +119,32 @@ This is fewer features than the SaaS players. The trade-off is full control of t
   with: { name: supabase-security-report, path: report.html }
 ```
 
+## Remediation
+
+`audit` (above) is read-only. The `remediate` subcommand consumes an audit result and prints a fix plan; **dry-run is the default — nothing mutates without `--apply`**. `--apply` needs a `SUPABASE_ACCESS_TOKEN` plus `--yes` (or a TTY `yes` confirmation).
+
+**Safety gate:** the tool cannot know which of your projects is production, so you declare it. Two tiers, and they are **not** interchangeable:
+
+- `SUPA360_PERMANENT_BLOCKED_REFS` (comma-separated) — **put production here.** These refs can never be remediated or used as a lab; no flag or env combination unblocks them.
+- `SUPA360_BLOCKED_REFS` — disposable **lab** projects. Blocked by default, but unblockable with `SUPA360_LAB_REF=<same ref>` + `--i-understand-this-is-destructive`. Listing production here does **not** protect it.
+
+Each finding runs in its own `BEGIN; … COMMIT;` and a pre-apply snapshot is saved for rollback.
+
+Declare them via env, or in a `.supa360.json` at your project root (gitignored — it names real refs, so never commit it):
+
+```json
+{
+  "permanent_blocked_refs": ["your-production-ref"],
+  "blocked_refs": ["your-disposable-lab-ref"]
+}
+```
+
+Config and env are UNIONed. A malformed `.supa360.json` is a hard error, not a silent loss of protection.
+
+```
+SUPA360_PERMANENT_BLOCKED_REFS=my-prod-ref node scripts/remediate.js result.json --apply --yes --token sbp_xxx
+```
+
 ## Limits — read these before trusting it
 
 - Doesn't audit per-object Storage RLS (would mean iterating every file).

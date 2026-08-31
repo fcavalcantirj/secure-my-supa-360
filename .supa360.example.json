@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "supabase-security config. Copy to .supa360.json in your project root (it is gitignored — it names real project refs, never commit it). Two independent sections: (1) ref protection — permanent_blocked_refs are refs that can NEVER be remediated or used as a lab under any flag or env combination (PUT PRODUCTION HERE), blocked_refs are disposable lab projects, blocked by default but unblockable via SUPA360_LAB_REF plus --i-understand-this-is-destructive. Both are UNIONed with the SUPA360_PERMANENT_BLOCKED_REFS / SUPA360_BLOCKED_REFS env vars. A malformed file is a hard error, never a silent loss of protection. (2) suppressions — each entry suppresses a finding whose target matches; the finding still appears in output (auditable) with suppressed=true, but is excluded from fail-gate counts. An optional 'check' field narrows the suppression to one check.",
+  "permanent_blocked_refs": [
+    "your-production-ref"
+  ],
+  "blocked_refs": [
+    "your-disposable-lab-ref"
+  ],
+  "suppressions": [
+    {
+      "target": "bucket:content-media",
+      "reason": "Intentionally public marketing media bucket — served over CDN, no PII"
+    },
+    {
+      "target": "table:public_blog_posts",
+      "check": "rls_disabled",
+      "reason": "Public blog posts — intentionally readable by anon"
+    },
+    {
+      "target": "get_public_config",
+      "check": "rpc_confirmed_executable",
+      "reason": "Intentionally public RPC returning non-sensitive config"
+    }
+  ]
+}

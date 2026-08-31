@@ -1,0 +1,475 @@
+[
+  {
+    "category": "agent-interface",
+    "description": "Stable machine-readable JSON contract is the PRIMARY output; the tool is fully driveable by an agent with zero human parsing",
+    "steps": [
+      "Define a versioned result schema: { schema_version, project_ref, generated_at, mode, summary: { by_severity, confirmed, inferred, suppressed }, findings: [] }",
+      "Each finding carries: id, check, category, severity, confidence ('confirmed'|'inferred'), target, evidence, probe {status,bytes,sample}, fix { sql[], rollback_sql[], dashboard_action, management_api_action, requires_service_role }, references[], suppressed, suppressed_reason",
+      "Commit a JSON Schema at schema/finding.schema.json and validate every run's output against it in tests",
+      "Guarantee deterministic ordering (severity desc, then check, then target) so diffs are stable across runs",
+      "Assert NO secret (PAT, service_role, jwt_secret, anon key) is ever written into the JSON output",
+      "Run `node scripts/audit.js <ref> --json` and pipe through the schema validator: exit 0 and 0 violations"
+    ],
+    "passes": true
+  },
+  {
+    "category": "agent-interface",
+    "description": "Deterministic exit codes + severity gate so an agent/CI loop can branch on results without scraping text",
+    "steps": [
+      "Exit 0 when no finding at or above --fail-on (default 'high')",
+      "Exit 2 when findings at/above --fail-on exist",
+      "Exit 10 on auth/token error, 11 on network error, 12 on schema-validation failure of own output (tool-broke vs project-vulnerable are distinguishable)",
+      "Document every code in SKILL.md and in `--help`",
+      "Test: run against a clean project (exit 0), a vulnerable fixture (exit 2), a bad token (exit 10)"
+    ],
+    "passes": true
+  },
+  {
+    "category": "agent-interface",
+    "description": "Single subcommand CLI (audit | probe | discover | remediate | verify | report) with one documented entrypoint for agents",
+    "steps": [
+      "Refactor cli.js to dispatch subcommands instead of forwarding only to audit.js",
+      "Each subcommand accepts --json and shares the finding schema",
+      "`report` is a separate step that consumes a prior JSON result (never auto-runs)",
+      "Add `--help` per subcommand listing flags, env vars, and exit codes",
+      "Test: each subcommand runs standalone and round-trips JSON in -> JSON/HTML out"
+    ],
+    "passes": true
+  },
+  {
+    "category": "agent-interface",
+    "description": "HTML report is OPT-IN only; default runs emit JSON so the skill is agent-first, HTML second",
+    "steps": [
+      "Remove HTML generation from the default audit path",
+      "Generate HTML only when --html <path> is passed, or when an interactive prompt 'Generate HTML report? [y/N]' is answered yes",
+      "In non-interactive/agent mode (no TTY) never prompt and never write HTML unless --html given",
+      "Keep HTML self-contained but built from the SAME JSON result (no separate data path)",
+      "Test: default run writes no .html; --html writes exactly one; piped/non-TTY run never blocks on a prompt"
+    ],
+    "passes": true
+  },
+  {
+    "category": "self-debug",
+    "description": "Per-check fault isolation + trace mode so an agent can diagnose and fix the tool itself",
+    "steps": [
+      "Wrap every check in try/catch; a failing check records { check, error } in output.errors[] and does NOT abort the whole run",
+      "Add --trace to log every Management-API query, HTTP status, and probe request/response to stderr (never secrets)",
+      "Surface partial results: a run with 2 failed checks still returns all other findings + a non-zero-but-distinct signal in summary.errors",
+      "Test: inject a forced error in one check; assert the run still completes, other findings present, error captured"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-rls",
+    "description": "Detect INEFFECTIVE RLS policies (RLS on but logic leaks) \u2014 the class that current on/off + policy-count checks miss",
+    "steps": [
+      "Flag policies with qual = 'true' / '(true)' (permissive read) on tables holding data reachable by anon/authenticated",
+      "Flag INSERT/UPDATE policies missing WITH CHECK, and policies where USING and WITH CHECK diverge unsafely",
+      "Flag tenant tables whose policy does not reference auth.uid() / a tenant column (cross-tenant read risk)",
+      "Reproduce the miss: a table with RLS ENABLED + one USING(true) policy + anon grants MUST produce a finding (today it produces none)",
+      "Seed that exact fixture, run audit, assert a 'high'/'critical' finding with confidence 'confirmed' via active probe"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-rls",
+    "description": "Active-probe EVERY anon- and authenticated-reachable table, not only RLS-disabled ones",
+    "steps": [
+      "Enumerate all public (and other exposed-schema) tables with any anon/authenticated grant OR any permissive policy",
+      "For each, hit /rest/v1/<table>?select=*&limit=1 with the anon key; classify 42501 (blocked) vs 200+[] (safe/empty) vs 200+rows (CONFIRMED leak)",
+      "Attach probe.bytes and a redacted sample to the finding as evidence",
+      "Do the same as the 'authenticated' role by minting/using a confirmed test user when signup is open (see auth task)",
+      "Test against fixture: confirmed-leak tables get confidence 'confirmed'; RLS-locked tables get 'safe' and no false finding"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-rpc",
+    "description": "Enumerate ALL anon/authenticated-EXECUTE functions (SECURITY DEFINER and INVOKER), not just SECURITY DEFINER or repo-referenced ones",
+    "steps": [
+      "Query pg_proc for every function where has_function_privilege('anon'|'authenticated','EXECUTE') is true, regardless of prosecdef",
+      "Record prosecdef, provolatile, return type, arg signature, and proconfig (search_path) per function",
+      "Do not rely on discover.js repo-parse alone; the DB is the source of truth for the function surface",
+      "Test: a fixture with an anon-executable SECURITY INVOKER function is enumerated (today only secdef is)"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-rpc",
+    "description": "Actively PROBE each anon-executable RPC to confirm exploitability instead of inferring from grants (fixes the 96-flag over-count)",
+    "steps": [
+      "Introspect each function's args; build a safe no-op payload (null/zero UUIDs, bogus ids) so the call cannot mutate real data",
+      "POST /rest/v1/rpc/<fn> with the anon key; classify 42501 (blocked), business-error (P0001/P0002/22023/23502 = body executed, no auth gate), 200/204 (executed)",
+      "Mark 'exploitable_without_auth' when the body executes for anon; downgrade grant-only-inference to confidence 'inferred'",
+      "Split summary counts: confirmed-executable vs merely-granted, so agents fix confirmed first",
+      "Test: attach_company_admin-style fixture returns business-error -> confirmed; a membership-gated fn returns a gate error -> not confirmed"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-rpc",
+    "description": "SECURITY DEFINER function body analysis for missing authorization and injection",
+    "steps": [
+      "Fetch function bodies (pg_get_functiondef) for anon/authenticated-executable secdef functions",
+      "Flag absence of any internal auth check (auth.uid(), auth.role(), auth.jwt(), current_setting('request.jwt...'), is_admin(), role/company checks)",
+      "Flag missing SET search_path (search_path injection) \u2014 keep existing check but tie it to the body analysis",
+      "Flag dynamic SQL (EXECUTE/format) built from arguments without quoting",
+      "Test: a secdef fn with no auth check + dynamic SQL yields two distinct findings"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-views",
+    "description": "Audit views and materialized views \u2014 a common RLS-bypass vector today unchecked",
+    "steps": [
+      "Enumerate public (and exposed-schema) views/matviews with anon/authenticated SELECT grant",
+      "Flag views with security_invoker OFF (they run as owner and bypass base-table RLS)",
+      "Flag views/matviews exposing PII columns (email, cpf, phone, health) reachable by anon",
+      "Active-probe each granted view via /rest/v1 like a table",
+      "Test: a security-definer view over an RLS-locked base table that leaks rows to anon is flagged 'confirmed'"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-storage",
+    "description": "Audit storage.objects POLICIES per bucket, not just the bucket.public flag (the anon-upload/delete holes were policy-level)",
+    "steps": [
+      "List every policy on storage.objects; per bucket classify anon/public INSERT/UPDATE/DELETE/SELECT",
+      "Flag anon INSERT (arbitrary upload), anon UPDATE/DELETE (tamper/wipe), and public SELECT on sensitive buckets",
+      "Flag policies lacking path/foldername scoping (storage.foldername(name) tenant checks)",
+      "Active-probe per bucket with the anon key: list, download a known object, attempt an upload (safe temp key), attempt delete of a non-existent key",
+      "Test fixture: a bucket with 'ALL public true'-style storage policies yields upload+delete+read findings"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-storage",
+    "description": "Bucket configuration hygiene",
+    "steps": [
+      "Report public flag, missing file_size_limit, missing/permissive allowed_mime_types per bucket",
+      "Cross-check: public bucket + object names embedding PII (e.g. CPF in path) raises severity",
+      "Recommend private + signed URLs for buckets holding sensitive media",
+      "Test: a public bucket with null mime/size limits is flagged medium+"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-schema-grants",
+    "description": "Column-level grants and non-public exposed schemas",
+    "steps": [
+      "Resolve scan schemas in Phase 0 from PostgREST db_schema ∪ schemas containing user relations; inline as n.nspname = ANY(ARRAY[...]) into ALL enumeration queries (tables, functions, RPC, views, default ACLs, realtime publication). On /config/postgrest fetch failure: push to errors and set scan_complete=false — never degrade to empty silently. Report schemas_scanned separately from exposed_schemas so a gap is visible",
+      "Enumerate column-level anon/authenticated grants (has_column_privilege) that expose sensitive columns even when table-level looks fine",
+      "Flag custom schemas exposed via the Data API that shouldn't be",
+      "Test: an anon column grant on a sensitive column of an otherwise-locked table is flagged"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-auth",
+    "description": "Deep auth configuration audit beyond signup/password/captcha",
+    "steps": [
+      "Pull /config/auth via Management API and evaluate: disable_signup, mailer_autoconfirm, external_anonymous_users_enabled, password_min_length, password_required_characters, password_hibp_enabled (leaked-password protection), MFA enrolled/enabled, jwt_exp, refresh_token_rotation_enabled, security_refresh_token_reuse_interval, uri_allow_list (redirect allowlist), site_url, rate_limit_* , security_captcha_enabled, custom SMTP",
+      "Flag: HIBP off, MFA off, long jwt_exp, empty/loose uri_allow_list, missing rate limits, autoconfirm on",
+      "Emit management_api_action (PATCH body) for each fixable item",
+      "Test: a project with min_length 6, HIBP off, autoconfirm on, open redirect allowlist yields the expected finding set"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-auth",
+    "description": "PII classifier to calibrate severity (LGPD/GDPR sensitive-data weighting)",
+    "steps": [
+      "Classify columns by name/type heuristics: cpf, cnpj, email, phone, birthdate, health/medical, address, government id",
+      "Any CONFIRMED anon/authenticated leak of a sensitive column is escalated to critical",
+      "Record classification in finding.evidence for the report and for breach-assessment context",
+      "Test: a confirmed anon read of a cpf column is escalated to critical"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-secrets",
+    "description": "Secret-exposure scanning (repo + client bundle) \u2014 currently absent; missed the plaintext API key case entirely",
+    "steps": [
+      "Static-scan the target repo (reusing discover.js file walk) for committed secrets: service_role JWT, sbp_ PATs, third-party API keys, DB connection strings, in code/docs/.env",
+      "Flag service_role or any non-anon key referenced under NEXT_PUBLIC_/VITE_ (shipped to browser)",
+      "Verify .env* is gitignored; flag secret-bearing tracked files (README/CLAUDE.md/etc.)",
+      "Detect legacy JWT anon key vs modern sb_publishable_ key; note both are public-by-design (not a finding by themselves)",
+      "Test: a repo with a service_role key in a tracked file and a key under NEXT_PUBLIC_ yields two findings"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-edge-functions",
+    "description": "Supabase Edge Functions security audit",
+    "steps": [
+      "List functions via Management API; for each read verify_jwt setting",
+      "Flag verify_jwt=false (publicly invokable) functions and wildcard CORS",
+      "Flag functions that read secrets and echo/log them, or accept unauthenticated writes",
+      "Emit remediation (set verify_jwt, tighten CORS) as management_api_action/dashboard_action",
+      "Test: a function with verify_jwt disabled is flagged high"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-network-db",
+    "description": "Network and database exposure hardening",
+    "steps": [
+      "Report direct Postgres (5432) reachability, SSL enforcement, network restrictions / IP allowlist state via Management API",
+      "Flag absent network restrictions on a production project",
+      "Report connection pooler mode (transaction vs session) relevant to serverless",
+      "Test: a project with no IP allowlist + open direct DB is flagged medium+"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-extensions-cron",
+    "description": "Extensions, pg_cron, pg_net, and Vault exposure",
+    "steps": [
+      "List installed extensions and versions; flag risky ones (http, pg_net) reachable by low-priv roles and any with known-CVE versions",
+      "Enumerate pg_cron jobs; flag jobs issuing net.http_post with embedded secrets in the command",
+      "Check vault.decrypted_secrets access grants; flag anon/authenticated readability",
+      "Test: a cron job with an inline bearer token in its command is flagged"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-realtime",
+    "description": "Realtime authorization audit (extends the existing publication-without-RLS check)",
+    "steps": [
+      "Keep: tables in supabase_realtime publication WITHOUT RLS (critical)",
+      "Add: realtime.messages / broadcast / presence authorization policies present when Realtime auth is enabled",
+      "Flag broadcast channels readable/writable by anon without policy",
+      "Test: a published table without RLS still fires; an unauthorized broadcast channel fires"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-data-api",
+    "description": "Data API surface configuration audit",
+    "steps": [
+      "Report Data API enabled/disabled, 'Automatically expose new tables' toggle, exposed schemas/tables/functions counts, extra search path",
+      "Recommend disabling auto-expose and/or Harden-Data-API (custom schema) when the app uses few/no tables via REST",
+      "Emit management_api_action to toggle these where the API allows",
+      "Test: a project with auto-expose ON yields a finding tied to the supabase_admin default-privileges limitation"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-rls",
+    "description": "Default-privileges audit across both owner roles and all object classes",
+    "steps": [
+      "Read pg_default_acl for role postgres AND supabase_admin, for TABLES, SEQUENCES, and FUNCTIONS",
+      "Flag any default granting data/EXECUTE to anon/authenticated on future objects",
+      "When SQL cannot fix it (supabase_admin owner \u2014 postgres is not a member), emit a dashboard_action (Data API -> auto-expose OFF) instead of unusable SQL",
+      "Test: postgres-owned defaults are fixed by generated SQL; supabase_admin-owned emit a dashboard_action, not a failing SQL"
+    ],
+    "passes": true
+  },
+  {
+    "category": "remediation",
+    "description": "Build the missing remediate.js (package.json references it but the file does not exist)",
+    "steps": [
+      "Create scripts/remediate.js consuming a prior JSON result",
+      "Default is DRY-RUN: print the ordered plan (SQL + management-API + dashboard actions) and do nothing",
+      "--apply executes: SQL fixes inside BEGIN/COMMIT per finding via the DB connection; management-API PATCH actions via the PAT",
+      "Skip and clearly list dashboard-only actions the tool cannot perform, with exact click-path",
+      "Test: dry-run mutates nothing; --apply on a fixture closes every SQL/API-fixable finding"
+    ],
+    "passes": true
+  },
+  {
+    "category": "remediation",
+    "description": "Every finding ships an executable fix AND a rollback, or a non-SQL action when SQL is impossible",
+    "steps": [
+      "fix.sql[] + fix.rollback_sql[] for DB-layer findings",
+      "fix.management_api_action { method, path, body } for auth/Data-API/bucket/edge findings",
+      "fix.dashboard_action (human click-path) only when neither SQL nor API can do it",
+      "fix.requires_service_role flagged where the remediation or the app-rebuild needs it",
+      "Test: each finding type has a populated, valid fix object; rollback restores prior state on the fixture"
+    ],
+    "passes": true
+  },
+  {
+    "category": "verification",
+    "description": "Belt-and-suspenders re-verification: after every fix, re-run the exact check/probe and prove closure",
+    "steps": [
+      "After --apply, re-execute each fixed finding's original probe/query",
+      "Set finding.remediation_verified true only when the anon/authenticated probe now returns 42501/blocked or the config now reads hardened",
+      "Emit a post-fix summary: fixed_confirmed, fixed_unverified, needs_dashboard",
+      "Test: on the fixture, all SQL/API fixes report remediation_verified=true; dashboard-only ones report needs_dashboard"
+    ],
+    "passes": true
+  },
+  {
+    "category": "verification",
+    "description": "Idempotency + reversibility guarantees for remediation",
+    "steps": [
+      "Snapshot grants/policies/bucket/auth config before any apply and store to a timestamped file",
+      "Applying the same fix twice must not error (idempotent)",
+      "Running the rollback restores the pre-fix snapshot exactly",
+      "Test: apply -> apply (no error) -> rollback -> state equals snapshot"
+    ],
+    "passes": true
+  },
+  {
+    "category": "verification",
+    "description": "Golden vulnerable-fixture harness as the regression gate for the whole 360",
+    "steps": [
+      "Provide fixtures/seed.sql that creates a deliberately vulnerable project state: RLS-on+USING(true) table, RLS-off table with anon grants, anon-exec SECURITY DEFINER fn with no auth check, security-definer view leaking a locked table, public bucket, anon-upload storage policy, weak auth config",
+      "test runner: seed -> audit -> assert each of the ~25 checks fires with expected severity/confidence",
+      "then remediate --apply -> re-audit -> assert zero findings remain except documented dashboard-only ones",
+      "Wire this as the CI gate; a new check is 'done' only when it has a fixture case",
+      "Test: full seed->audit->remediate->verify cycle is green end-to-end"
+    ],
+    "passes": true
+  },
+  {
+    "category": "verification",
+    "description": "Baseline + diff mode to catch regressions over time",
+    "steps": [
+      "`audit ... --baseline baseline.json` writes a signed baseline of accepted findings",
+      "Subsequent runs diff against baseline and mark NEW findings as regressions",
+      "Exit non-zero when a new finding at/above --fail-on appears vs baseline",
+      "Test: adding a new vuln to the fixture after baselining is reported as a regression and fails the gate"
+    ],
+    "passes": true
+  },
+  {
+    "category": "false-positives",
+    "description": "Explicit suppression/allowlist so intentional exposure is acknowledged, never silently dropped",
+    "steps": [
+      "Read .supa360.json: allowlist of intentional public buckets, public-read tables, and anon-callable RPCs (each with a reason)",
+      "Suppressed items still appear in output with suppressed=true and suppressed_reason (auditable), and are excluded from the fail-gate counts",
+      "Warn when an allowlisted item no longer exists (stale suppression)",
+      "Test: an allowlisted public 'content-media' bucket is suppressed with reason; a non-allowlisted public bucket still fails"
+    ],
+    "passes": true
+  },
+  {
+    "category": "reporting",
+    "description": "HTML report renders the FULL new finding schema, gated behind opt-in, built from the JSON result",
+    "steps": [
+      "Report consumes the exact JSON result; no second data path",
+      "Render evidence, probe bytes/sample, confidence badge (confirmed vs inferred), fix SQL + rollback, management/dashboard actions, suppressed items section",
+      "Keep self-contained; make CDN assets (Tailwind/Chart.js) optional/inlined so the report works offline",
+      "Only produced on --html or an interactive yes; never in agent/non-TTY mode by default",
+      "Test: --html on the fixture result produces a report showing every finding field and opens offline"
+    ],
+    "passes": true
+  },
+  {
+    "category": "reporting",
+    "description": "Separate the marketing/landing generators from the audit runtime so the agent core is clean",
+    "steps": [
+      "Move gen_niche_landings.py, gen_multi_stack_landings.py, marketing/, and stripe/apify/landing links out of the scripts/ runtime path",
+      "Ensure no audit/remediate/report code imports or links to external commercial URLs",
+      "Keep them under a clearly separated docs/website area if retained",
+      "Test: grep of scripts/{audit,discover,remediate,report,verify}.js shows no stripe.com/apify.com/landing URLs"
+    ],
+    "passes": true
+  },
+  {
+    "category": "ci",
+    "description": "Update the GitHub Action to the new engine, exit codes, and JSON artifact",
+    "steps": [
+      "Wire action.yml to the subcommand CLI and the new exit-code contract for fail-on",
+      "Upload the JSON result as a build artifact; HTML only if requested",
+      "Emit outputs: critical-count, high-count, confirmed-count, grade",
+      "No third-party actions on the run path (supply-chain); pure node + checkout only",
+      "Test: the action fails a PR against the vulnerable fixture and passes against the remediated one"
+    ],
+    "passes": true
+  },
+  {
+    "category": "docs",
+    "description": "Rewrite SKILL.md as the accurate agent-driving contract (current one is stale: lists 6 checks, code has 11, target is ~25)",
+    "steps": [
+      "Document the full check catalog by category with severities and whether each is confirmed-by-probe or inferred",
+      "Document subcommands, flags, env vars (SUPABASE_ACCESS_TOKEN, SUPABASE_DB_URL), and every exit code",
+      "Document the end-to-end unattended flow an agent follows: audit -> read JSON -> remediate --apply -> verify -> (optional) report",
+      "State the trust/secret handling: token never persisted, secrets never in output, DB password only for direct-DB remediation",
+      "Test: SKILL.md check count matches the code; a fresh agent can run the full cycle from SKILL.md alone"
+    ],
+    "passes": true
+  },
+  {
+    "category": "agent-interface",
+    "description": "Package hygiene: fix broken script refs, preserve zero-dependency runtime, wire the bin",
+    "steps": [
+      "Remove or implement the package.json 'remediate' script (currently points at a non-existent file)",
+      "Keep dependencies empty (pure Node stdlib) so agents run it with `node` and no install/supply-chain",
+      "Point bin at the subcommand CLI; make postinstall silent and side-effect-free in CI/agent contexts",
+      "Test: fresh clone runs every subcommand with `node` and no npm install; `npm run` targets all resolve"
+    ],
+    "passes": true
+  },
+  {
+    "category": "coverage-rpc",
+    "description": "Confidence-calibrated severity so agents act on proven exposure first",
+    "steps": [
+      "confidence='confirmed' (live probe executed/leaked) always outranks 'inferred' (grant/definition only)",
+      "summary splits confirmed vs inferred per severity; --fail-on can target confirmed-only",
+      "Inferred-only RPC surface (e.g. 96 granted-but-gated functions) is reported but not counted as confirmed criticals",
+      "Test: the style case reports a large inferred count and a small/zero confirmed count, distinctly"
+    ],
+    "passes": true
+  },
+  {
+    "category": "rls-performance",
+    "description": "Flag auth functions called UNWRAPPED in a policy (per-row execution) \u2014 recommend (select auth.uid())",
+    "steps": [
+      "Pure module scripts/checks/rls_perf.js: scan every policy qual + with_check for auth.uid()/auth.jwt()/auth.role()/current_setting() NOT already wrapped in a scalar subselect '(select ...)'",
+      "An unwrapped call re-executes per row and defeats the optimizer initPlan cache; flag it (severity medium \u2014 perf, not security)",
+      "fix: rewrite e.g. 'auth.uid() = user_id' -> '(select auth.uid()) = user_id'; provide the exact rewritten policy in fix.sql where derivable",
+      "Do NOT flag when already wrapped as (select auth.uid()); handle whitespace/case variants",
+      "Unit-test with mock policy rows (wrapped -> no finding, unwrapped -> finding). LIVE-VERIFY against real policies (they have many auth.uid() policies) so the parser handles real policy text, not just mocks \u2014 this is the acceptance"
+    ],
+    "passes": true
+  },
+  {
+    "category": "rls-performance",
+    "description": "Flag RLS policy columns with no supporting index (unindexed policy predicate \u2014 up to 100x slower)",
+    "steps": [
+      "Extract column identifiers referenced in each policy qual/with_check (e.g. user_id, company_id, team_id)",
+      "Query pg_index (+ pg_attribute) for the policy's table; flag a referenced column that has NO btree index leading with it",
+      "severity medium (high on large tables); fix.sql: CREATE INDEX <t>_<col> ON <schema>.<t> USING btree (<col>); rollback DROP INDEX",
+      "Be conservative: only flag columns that are simple equality predicates against a wrapped/auth value (avoid false positives on expressions/joins)",
+      "Unit-test column-extraction + index-match with mock catalog rows. LIVE-VERIFY against 189 tables, many tenant policies) \u2014 acceptance = runs to completion and flags real unindexed policy columns without false storms"
+    ],
+    "passes": true
+  },
+  {
+    "category": "rls-performance",
+    "description": "Flag joins/correlated subqueries inside a policy body \u2014 recommend a SECURITY DEFINER helper or reversed IN/ANY",
+    "steps": [
+      "Detect in policy qual/with_check: EXISTS (SELECT ... FROM <other_table>) or a correlated 'x in (select ... from <join_table> where ... = <table>.col)'",
+      "These run row-by-row against varying join data; recommend (a) encapsulate in a SECURITY DEFINER function called as (select has_role()), or (b) reverse the join to a non-correlated IN/ANY (team_id in (select team_id from team_user where user_id = (select auth.uid())))",
+      "severity medium; fix = guidance + the reversed form where mechanically derivable (else dashboard_action/manual note)",
+      "Unit-test detection on mock policy bodies (join present -> finding; simple equality -> none). LIVE-VERIFY on real policies (nested/company-scope policies exist) \u2014 acceptance"
+    ],
+    "passes": true
+  },
+  {
+    "category": "rls-performance",
+    "description": "Flag policies scoped to public / missing an explicit TO authenticated (forces anon pre-evaluation)",
+    "steps": [
+      "For each policy, read pg_policies.roles; flag policies with roles = {public} (no explicit TO) on tables that are auth-scoped",
+      "Perf angle (distinct from the security permissive-policy check): a public-role policy makes Postgres evaluate the policy for anon before rejecting \u2014 adding TO authenticated filters unauthorized users first",
+      "severity low; fix.sql: recreate the policy with TO authenticated (+ TO anon only where anon genuinely needs it); rollback recreate original",
+      "Coordinate with the existing security rls checks so this does not double-report the same policy as a security finding \u2014 this finding is PERF-tagged",
+      "Unit-test role parsing (public -> finding; {authenticated} -> none). LIVE-VERIFY against a real project"
+    ],
+    "passes": true
+  },
+  {
+    "category": "rls-performance",
+    "description": "Flag queries relying on RLS alone without an application-level filter (repo scan, best-effort)",
+    "steps": [
+      "In discover.js (repo scan): find .from('<table>').select(...) calls that target an RLS/tenant table but carry NO matching .eq('<tenant_col>', ...) filter",
+      "Recommend adding the explicit filter in addition to RLS (.eq('user_id', userId)) so the planner prunes rows before RLS",
+      "severity low, confidence inferred (static heuristic); clearly mark best-effort \u2014 cannot see runtime queries, only literal .from().select() chains",
+      "Unit-test against sample source strings (missing filter -> finding; present -> none). No live DB needed (repo-only); note the heuristic limits in the finding"
+    ],
+    "passes": true
+  }
+]

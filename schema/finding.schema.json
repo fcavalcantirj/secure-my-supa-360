@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://secure-my-supa-360/schema/finding.schema.json",
+  "title": "Supabase Security Audit Result",
+  "description": "Stable machine-readable JSON contract v1.0 — the PRIMARY output of secure-my-supa-360 (a.k.a. supabase-security). Validated by scripts/validate.js and tests/contract.test.js.",
+  "type": "object",
+  "required": ["schema_version", "project_ref", "generated_at", "mode", "summary", "findings"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "project_ref": { "type": "string", "minLength": 1 },
+    "project_name": { "type": ["string", "null"] },
+    "region": { "type": ["string", "null"] },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "mode": { "type": "string", "enum": ["audit-active", "audit-passive", "discover"] },
+    "summary": { "$ref": "#/$defs/summary" },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "errors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/error_entry" }
+    },
+    "active_probe": { "type": ["object", "null"] },
+    "rpc_probe": { "type": ["object", "null"] },
+    "n_tables_scanned": { "type": ["integer", "null"] },
+    "n_functions_scanned": { "type": ["integer", "null"] },
+    "n_buckets_scanned": { "type": ["integer", "null"] },
+    "n_columns_scanned": { "type": ["integer", "null"] },
+    "n_edge_functions_scanned": { "type": ["integer", "null"] },
+    "n_extensions_scanned": { "type": ["integer", "null"] },
+    "n_schemas_scanned": { "type": ["integer", "null"] },
+    "schemas_scanned": { "type": ["integer", "null"] },
+    "exposed_schemas": { "type": ["array", "null"], "items": { "type": "string" } },
+    "scan_complete": { "type": "boolean" },
+    "scan_failures": { "type": "array", "items": { "type": "string" } },
+    "db_version": { "type": ["string", "null"] },
+    "timed_out": { "type": ["boolean", "null"] },
+    "baseline_diff": { "type": ["object", "null"] }
+  },
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "required": ["by_severity", "confirmed", "inferred", "suppressed"],
+      "properties": {
+        "by_severity": {
+          "type": "object",
+          "required": ["critical", "high", "medium", "low", "info"],
+          "properties": {
+            "critical": { "type": "integer", "minimum": 0 },
+            "high": { "type": "integer", "minimum": 0 },
+            "medium": { "type": "integer", "minimum": 0 },
+            "low": { "type": "integer", "minimum": 0 },
+            "info": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "confirmed": { "type": "integer", "minimum": 0 },
+        "inferred": { "type": "integer", "minimum": 0 },
+        "suppressed": { "type": "integer", "minimum": 0 },
+        "error_count": { "type": "integer", "minimum": 0 },
+        "confirmed_by_severity": {
+          "type": "object",
+          "required": ["critical", "high", "medium", "low", "info"],
+          "properties": {
+            "critical": { "type": "integer", "minimum": 0 },
+            "high": { "type": "integer", "minimum": 0 },
+            "medium": { "type": "integer", "minimum": 0 },
+            "low": { "type": "integer", "minimum": 0 },
+            "info": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "inferred_by_severity": {
+          "type": "object",
+          "required": ["critical", "high", "medium", "low", "info"],
+          "properties": {
+            "critical": { "type": "integer", "minimum": 0 },
+            "high": { "type": "integer", "minimum": 0 },
+            "medium": { "type": "integer", "minimum": 0 },
+            "low": { "type": "integer", "minimum": 0 },
+            "info": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "error_entry": {
+      "type": "object",
+      "required": ["check", "error"],
+      "properties": {
+        "check": { "type": "string" },
+        "error": { "type": "string" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": ["id", "check", "category", "severity", "confidence", "target", "evidence", "fix", "references", "suppressed", "suppressed_reason"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "check": { "type": "string", "minLength": 1 },
+        "category": { "type": "string" },
+        "severity": { "type": "string", "enum": ["critical", "high", "medium", "low", "info"] },
+        "confidence": { "type": "string", "enum": ["confirmed", "inferred"] },
+        "target": { "type": "string" },
+        "evidence": { "type": "object" },
+        "probe": {
+          "type": ["object", "null"],
+          "required": ["status"],
+          "properties": {
+            "status": { "type": ["integer", "null"] },
+            "bytes": { "type": ["integer", "null"] },
+            "sample": {
+              "type": ["object", "null"],
+              "properties": {
+                "row_count": { "type": ["integer", "null"] },
+                "columns": { "type": ["array", "null"] }
+              }
+            }
+          }
+        },
+        "fix": { "$ref": "#/$defs/fix" },
+        "references": { "type": "array", "items": { "type": "string" } },
+        "suppressed": { "type": "boolean" },
+        "suppressed_reason": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"] },
+        "explain": { "type": ["string", "null"] },
+        "details": { "type": ["object", "null"] },
+        "fix_sql": { "type": ["string", "null"] },
+        "exploitable_without_auth": { "type": ["boolean", "null"] },
+        "mode": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "fix": {
+      "type": "object",
+      "required": ["sql", "rollback_sql", "requires_service_role"],
+      "properties": {
+        "sql": { "type": "array", "items": { "type": "string" } },
+        "rollback_sql": { "type": "array", "items": { "type": "string" } },
+        "dashboard_action": { "type": ["string", "null"] },
+        "management_api_action": { "type": ["object", "null"] },
+        "requires_service_role": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

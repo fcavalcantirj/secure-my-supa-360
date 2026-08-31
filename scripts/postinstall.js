@@ -1,24 +1,20 @@
 #!/usr/bin/env node
-// Postinstall hook — prints a friendly nudge to actually run the auditor.
-// Skipped silently in CI to not pollute deploy logs.
+// Postinstall hook.
+// Intentionally silent and side-effect-free in ALL contexts:
+//   - CI environments (CI=true)
+//   - Non-TTY / piped / agent environments
+//   - Production (NODE_ENV=production)
+// No network calls, no file writes, no commercial URLs, no process.exit
+// that could fail a build. Only prints a single non-URL hint on an
+// interactive TTY so a human running `npm install` locally gets a reminder.
 
-if (process.env.CI || process.env.NODE_ENV === 'production') process.exit(0);
+const isCI = !!process.env.CI;
+const isProd = process.env.NODE_ENV === 'production';
+const isTTY = process.stdout.isTTY === true;
 
-const lines = [
-  "",
-  "  ┌──────────────────────────────────────────────────────────────────────────┐",
-  "  │  ✓ supabase-security installed                                          │",
-  "  │                                                                          │",
-  "  │  Run it now (read-only PAT, never persisted):                            │",
-  "  │    npx supabase-security <project-ref> --html report.html                │",
-  "  │                                                                          │",
-  "  │  No-install version (browser, no npm):                                   │",
-  "  │    https://apify.com/renzomacar/supabase-security-auditor                │",
-  "  │                                                                          │",
-  "  │  Want me to run it for you and send back a written report? $99, 24h:    │",
-  "  │    https://perufitlife.github.io/supabase-security-skill/                │",
-  "  └──────────────────────────────────────────────────────────────────────────┘",
-  ""
-].join("\n");
+if (isCI || isProd || !isTTY) process.exit(0);
 
-process.stdout.write(lines);
+// Local interactive use only — a single line, no URLs.
+process.stdout.write(
+  'supabase-security installed — run: npx supabase-security <project-ref>\n'
+);

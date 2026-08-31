@@ -7,14 +7,14 @@ Each niche gets /docs/{slug}/index.html with:
   - Niche-specific FAQ
   - Same Stripe Payment Links ($99/$249) reused
 
-Run: python scripts/gen_niche_landings.py
+Run: python docs/gen_niche_landings.py
 Idempotent: regenerates from config each run.
 """
 import json, pathlib, html
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DOCS = ROOT / 'docs'
-CONFIG = ROOT / 'scripts/niches_config.json'
+CONFIG = ROOT / 'docs/niches_config.json'
 
 TEMPLATE = """<!DOCTYPE html>
 <html lang="en">

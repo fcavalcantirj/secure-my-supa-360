@@ -1,5 +1,5 @@
 name: 'Supabase Security Audit'
-description: 'Audit your Supabase project for RLS leaks, exposed buckets, anon-readable tables. Active anon-key probe confirms each finding live.'
+description: 'Audit your Supabase project for RLS leaks, exposed buckets, anon-readable tables. Active anon-key probe confirms each finding live. JSON result + optional HTML.'
 author: 'Renzo Madueno (@Perufitlife)'
 branding:
   icon: 'shield'
@@ -12,77 +12,127 @@ inputs:
   token:
     description: 'Supabase Personal Access Token (read-only is enough). Generate at https://supabase.com/dashboard/account/tokens'
     required: true
-  output-path:
-    description: 'Path for the HTML report'
-    required: false
-    default: 'supabase-security-report.html'
   fail-on:
-    description: 'Severity to fail the workflow on: critical, high, medium, low, never'
+    description: 'Severity to fail the workflow on: critical, high, medium, low, info, never. Default: critical'
     required: false
     default: 'critical'
+  html:
+    description: 'Optional path for an HTML report (e.g. report.html). If empty (default), JSON-only output.'
+    required: false
+    default: ''
   webhook-url:
-    description: 'Optional webhook to POST findings to (e.g., RLS Monitor)'
+    description: 'Optional webhook to POST findings to'
     required: false
   webhook-token:
     description: 'Optional bearer token for the webhook'
     required: false
+  permanent-blocked-refs:
+    description: 'Comma-separated project refs that can NEVER be remediated or used as a lab, under any flag or env combination (maps to SUPA360_PERMANENT_BLOCKED_REFS). PUT YOUR PRODUCTION REFS HERE. Unset by default — the tool cannot know which of your projects is production; set this yourself.'
+    required: false
+    default: ''
+  blocked-refs:
+    description: 'Comma-separated refs for DISPOSABLE LAB projects: blocked by default, but unblockable via SUPA360_LAB_REF plus --i-understand-this-is-destructive (maps to SUPA360_BLOCKED_REFS). Never list a production ref here — use permanent-blocked-refs instead.'
+    required: false
+    default: ''
 
 outputs:
   critical-count:
     description: 'Number of CRITICAL findings'
-    value: ${{ steps.scan.outputs.critical }}
+    value: ${{ steps.scan.outputs.critical_count }}
   high-count:
     description: 'Number of HIGH findings'
-    value: ${{ steps.scan.outputs.high }}
+    value: ${{ steps.scan.outputs.high_count }}
+  confirmed-count:
+    description: 'Number of CONFIRMED (live-probed) findings'
+    value: ${{ steps.scan.outputs.confirmed_count }}
   grade:
     description: 'Letter grade (A+ to F)'
     value: ${{ steps.scan.outputs.grade }}
-  report-path:
-    description: 'Path of the generated HTML report'
-    value: ${{ inputs.output-path }}
+  error-count:
+    description: 'Number of per-check errors'
+    value: ${{ steps.scan.outputs.error_count }}
+  exit-code:
+    description: 'CLI exit code (0 clean, 2 findings, 10 auth, 11 network, 12 tool-error)'
+    value: ${{ steps.scan.outputs.exit_code }}
 
 runs:
   using: 'composite'
   steps:
-    - name: Install Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
+    # --- Run purely from local repo code (no remote package fetch on the run path) ---
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-    - name: Run supabase-security audit
+    # --- Run audit from local scripts, JSON output ---
+    - name: Run supabase-security audit (local node scripts)
       id: scan
       shell: bash
       env:
-        PROJECT_REF: ${{ inputs.project-ref }}
         SUPABASE_ACCESS_TOKEN: ${{ inputs.token }}
-        OUTPUT_PATH: ${{ inputs.output-path }}
-        FAIL_ON: ${{ inputs.fail-on }}
+        SUPA360_PERMANENT_BLOCKED_REFS: ${{ inputs.permanent-blocked-refs }}
+        SUPA360_BLOCKED_REFS: ${{ inputs.blocked-refs }}
       run: |
-        echo "::group::Running supabase-security@latest"
-        npx -y supabase-security@latest "$PROJECT_REF" \
-          --html "$OUTPUT_PATH" \
-          > findings.json
-        echo "::endgroup::"
+        set +e
+        node scripts/cli.js audit "${{ inputs.project-ref }}" \
+          --fail-on "${{ inputs.fail-on }}" \
+          --json \
+          > audit-result.json 2>&1
+        EXIT_CODE=$?
+        set -e
 
-        # Parse counts + grade for outputs
-        CRIT=$(jq '[.findings[] | select(.severity=="critical")] | length' findings.json)
-        HIGH=$(jq '[.findings[] | select(.severity=="high")] | length' findings.json)
-        # Compute grade from score (mirroring report.js logic)
-        SCORE=$(jq '.summary.score // 100' findings.json)
-        GRADE=$(awk -v s="$SCORE" 'BEGIN{ if(s>=95)print "A+"; else if(s>=85)print "A"; else if(s>=70)print "B"; else if(s>=50)print "C"; else if(s>=30)print "D"; else print "F" }')
-        echo "critical=$CRIT" >> $GITHUB_OUTPUT
-        echo "high=$HIGH" >> $GITHUB_OUTPUT
-        echo "grade=$GRADE" >> $GITHUB_OUTPUT
-        echo "::notice title=Supabase Security::Grade $GRADE — $CRIT critical, $HIGH high"
+        # Export the JSON result path for downstream steps
+        echo "result_path=audit-result.json" >> $GITHUB_OUTPUT
+        echo "exit_code=${EXIT_CODE}" >> $GITHUB_OUTPUT
 
-        # Apply fail-on policy
-        case "$FAIL_ON" in
-          critical) [[ "$CRIT" -gt 0 ]] && exit 1 ;;
-          high)     [[ $((CRIT + HIGH)) -gt 0 ]] && exit 1 ;;
-          never)    ;;
-        esac
-        exit 0
+        # Non-fatal exit codes: 0 (clean), 2 (findings at/above fail-on)
+        # We extract outputs from the JSON result regardless of exit code.
+        if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 2 ]; then
+          : # OK — proceed to extract outputs
+        else
+          echo "::error::Audit failed — exit code ${EXIT_CODE} (10=auth, 11=network, 12=tool-error)"
+          cat audit-result.json
+          exit $EXIT_CODE
+        fi
 
+        # Extract counts + grade from the JSON result (pure node, no jq dependency)
+        node -e '
+          const { resultToOutputs } = await import("./scripts/ci.js");
+          const fs = await import("node:fs");
+          const r = JSON.parse(fs.readFileSync("audit-result.json", "utf8"));
+          const out = resultToOutputs(r);
+          const lines = Object.entries(out).map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
+          fs.appendFileSync(process.env.GITHUB_OUTPUT || "", lines);
+        '
+
+        echo "::notice title=Supabase Security::Grade ${{ steps.scan.outputs.grade }} — ${{ steps.scan.outputs.critical_count }} critical, ${{ steps.scan.outputs.high_count }} high, ${{ steps.scan.outputs.confirmed_count }} confirmed"
+
+        # Exit 0 = clean, Exit 2 = findings at/above fail-on threshold (intended)
+        exit $EXIT_CODE
+
+    # --- Optional HTML report (only when inputs.html is set) ---
+    - name: Generate HTML report (optional)
+      if: ${{ inputs.html != '' }}
+      shell: bash
+      run: |
+        node scripts/cli.js report audit-result.json --html "${{ inputs.html }}"
+
+    # --- Upload JSON result as artifact (primary contract) ---
+    - name: Upload JSON result artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: supabase-security-findings
+        path: audit-result.json
+        retention-days: 14
+
+    # --- Upload HTML report artifact (only when html is set) ---
+    - name: Upload HTML report artifact
+      if: ${{ inputs.html != '' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: supabase-security-html-report
+        path: ${{ inputs.html }}
+        retention-days: 14
+
+    # --- Optional webhook POST ---
     - name: POST findings to webhook (optional)
       if: ${{ inputs.webhook-url != '' }}
       shell: bash
@@ -90,12 +140,5 @@ runs:
         curl -sS -X POST "${{ inputs.webhook-url }}" \
           -H "Content-Type: application/json" \
           ${{ inputs.webhook-token && format('-H "Authorization: Bearer {0}"', inputs.webhook-token) || '' }} \
-          --data-binary @findings.json
+          --data-binary @audit-result.json
         echo "Findings posted to webhook."
-
-    - name: Upload HTML report artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: supabase-security-report
-        path: ${{ inputs.output-path }}
-        retention-days: 14

@@ -3,5 +3,27 @@ node_modules/
 .env
 .env.local
 test/*.html
-test/*.json
+test/out/*.json
 .DS_Store
+
+# handover with secrets (redacted; rotate tokens)
+ARCHITECT-HANDOVER.md
+docs/objective.md
+
+# live prod audit artifacts (real project schema maps) — NEVER commit to a public repo
+evidence/
+
+# python bytecode
+__pycache__/
+*.pyc
+
+# session handover artifacts — reference a live client's production schema
+# (function names, unremediated exposure). Keep local, never publish.
+docs/handovers/
+
+# remediation snapshots — RUNTIME OUTPUT from real apply/rollback runs.
+# Contain the target project ref and its live state. Never publish.
+fixtures/remediation_snapshot_*.json
+
+# operator ref-protection config — may name real production refs
+.supa360.json

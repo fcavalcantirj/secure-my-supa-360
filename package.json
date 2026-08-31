@@ -6,10 +6,20 @@
   "bin": {
     "supabase-security": "./scripts/cli.js"
   },
+  "files": [
+    "scripts/",
+    "schema/",
+    "SKILL.md",
+    "README.md",
+    "LICENSE",
+    "action.yml",
+    ".supa360.example.json"
+  ],
   "scripts": {
     "audit": "node scripts/audit.js",
     "report": "node scripts/report.js",
     "remediate": "node scripts/remediate.js",
+    "test": "node --test test/*.test.js",
     "postinstall": "node scripts/postinstall.js || true"
   },
   "keywords": [

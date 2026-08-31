@@ -1,0 +1,97 @@
+{
+  "schema_version": "1.0",
+  "project_ref": "fixture-ref",
+  "project_name": "Lab Project (Failed Scan)",
+  "region": "us-east-1",
+  "generated_at": "2026-08-28T13:37:38.327Z",
+  "mode": "audit-passive",
+  "summary": {
+    "by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "confirmed": 0,
+    "inferred": 0,
+    "confirmed_by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "inferred_by_severity": {
+      "critical": 0,
+      "high": 0,
+      "medium": 0,
+      "low": 0,
+      "info": 0
+    },
+    "suppressed": 0,
+    "error_count": 8,
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "info": 0
+  },
+  "findings": [],
+  "errors": [
+    {
+      "check": "rls_tables",
+      "error": "SQL 544: {\"message\":\"Failed to run sql query: Connection terminated due to connection timeout\"}"
+    },
+    {
+      "check": "function_secdef",
+      "error": "SQL 544: {\"message\":\"Failed to run sql query: Connection terminated due to connection timeout\"}"
+    },
+    {
+      "check": "rpc_probe",
+      "error": "SQL 544: {\"message\":\"Failed to run sql query: Connection terminated due to connection timeout\"}"
+    },
+    {
+      "check": "function_body",
+      "error": "SQL 544: {\"message\":\"Failed to run sql query: Connection terminated due to connection timeout\"}"
+    },
+    {
+      "check": "views",
+      "error": "SQL 544: {\"message\":\"Failed to run sql query: Connection terminated due to connection timeout\"}"
+    },
+    {
+      "check": "default_privileges",
+      "error": "This operation was aborted"
+    },
+    {
+      "check": "schema_grants",
+      "error": "This operation was aborted"
+    },
+    {
+      "check": "storage_policies",
+      "error": "This operation was aborted"
+    }
+  ],
+  "active_probe": {
+    "enabled": false,
+    "probed": 0,
+    "confirmed": 0,
+    "auth_user_signed_up": false
+  },
+  "rpc_probe": {
+    "enabled": false,
+    "scanned": 0,
+    "confirmed": 0,
+    "inferred": 0
+  },
+  "n_tables_scanned": 0,
+  "n_functions_scanned": 0,
+  "n_edge_functions_scanned": 0,
+  "n_buckets_scanned": 0,
+  "n_columns_scanned": 0,
+  "n_extensions_scanned": 0,
+  "timed_out": true,
+  "scanned_at": "2026-08-28T13:37:38.327Z",
+  "scanned_by": "supabase-security v0.4",
+  "stale_suppressions": []
+}
