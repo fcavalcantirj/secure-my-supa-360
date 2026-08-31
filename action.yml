@@ -1,6 +1,6 @@
 name: 'Supabase Security Audit'
 description: 'Audit your Supabase project for RLS leaks, exposed buckets, anon-readable tables. Active anon-key probe confirms each finding live. JSON result + optional HTML.'
-author: 'Renzo Madueno (@Perufitlife)'
+author: 'fcavalcantirj'
 branding:
   icon: 'shield'
   color: 'green'

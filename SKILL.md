@@ -2,9 +2,9 @@
 name: supabase-security
 description: "Agent-driving 360° Supabase security auditor. Scans RLS, RPC, storage, auth, network, extensions, realtime, data-api, secrets — and ACTIVELY PROBES each leak with the anon key to confirm it, not just infer it. Zero deps, runs locally, token never leaves your machine."
 metadata:
-  author: Perufitlife
+  author: fcavalcantirj
   version: "0.4.2"
-  homepage: https://github.com/Perufitlife/supabase-security-skill
+  homepage: https://github.com/fcavalcantirj/secure-my-supa-360
 ---
 
 # Supabase Security Skill (360° Auditor)

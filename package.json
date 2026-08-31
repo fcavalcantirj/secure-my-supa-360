@@ -1,10 +1,11 @@
 {
-  "name": "supabase-security",
+  "name": "secure-my-supa-360",
   "version": "0.4.2",
   "description": "Audit Supabase security issues (RLS, grants, exposed functions) AND prove leaks live via active anon-key probe. Other auditors infer; this one fetches and shows the bytes leaked.",
   "type": "module",
   "bin": {
-    "supabase-security": "./scripts/cli.js"
+    "secure-my-supa-360": "./scripts/cli.js",
+    "supa360": "./scripts/cli.js"
   },
   "files": [
     "scripts/",
@@ -30,13 +31,20 @@
     "postgres",
     "ai-skill"
   ],
-  "author": "Renzo Madueno (@Perufitlife)",
+  "author": "fcavalcantirj",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Perufitlife/supabase-security-skill"
+    "url": "git+https://github.com/fcavalcantirj/secure-my-supa-360.git"
   },
   "engines": {
     "node": ">=18"
+  },
+  "contributors": [
+    "Renzo Madueno (@Perufitlife) — original supabase-security-skill, MIT"
+  ],
+  "homepage": "https://github.com/fcavalcantirj/secure-my-supa-360#readme",
+  "bugs": {
+    "url": "https://github.com/fcavalcantirj/secure-my-supa-360/issues"
   }
 }

@@ -1,4 +1,3 @@
-# These are supported funding model platforms
-
-custom: ['https://buy.stripe.com/6oUeVd1nqfj47yxbTscAo0e', 'https://perufitlife.github.io/supabase-security-skill/']
-
+# No funding links. This fork is not monetized.
+# (The upstream project's payment links were removed when this was forked —
+#  they routed to a third party's checkout from this repository's Sponsor button.)

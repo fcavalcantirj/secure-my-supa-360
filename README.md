@@ -1,136 +1,91 @@
-# supabase-security
+# secure-my-supa-360
 
-> Audit and harden any Supabase project. Local-only, no SaaS, your token never leaves your machine. **v0.3 ships with active anon-key probe — confirms each leak live, not just inferred.**
-
-> ▶ **Run it without installing anything →** [apify.com/renzomacar/supabase-security-auditor](https://apify.com/renzomacar/supabase-security-auditor) (paste project ref + PAT, get HTML report)
-
-> ⚡ **Want me to run it for you?** Tiers from **$5 single-fix bundle → $99 full report → $249 multi-tenant audit** — [perufitlife.github.io/supabase-security-skill](https://perufitlife.github.io/supabase-security-skill/) (one landing covers all five — Supabase, PocketBase, Appwrite, Hasura, Firebase)
-
-> 🪞 **Sister tool**: [aitells](https://aitells.vercel.app/) detects + rewrites AI fingerprints in your text. Free detector at the URL, free first rewrite at [/rewrite](https://aitells.vercel.app/rewrite) (paste your own writing samples, get the AI text matched to your voice). Built after my own Reddit account got 2 "all AI generated" callouts in one day.
-
-> 🤖 **Use it in GitHub Actions** — drop this into `.github/workflows/security.yml`:
-> ```yaml
-> - uses: Perufitlife/supabase-security-skill@v1.0.0-action
->   with:
->     project-ref: ${{ vars.SUPABASE_PROJECT_REF }}
->     token: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
->     fail-on: critical
-> ```
->
-> 🔁 **Want this running on a cron?** [RLS Monitor](https://rls-monitor.vercel.app/) does weekly diff-based scans + email alerts when new findings appear — $29/mo, your keys never leave your CI.
->
-> 📦 **Need all 5 BaaS stacks at once?** The [BaaS Security Pack](https://perufitlife.github.io/supabase-security-skill/pack.html) bundles every scanner + sample reports + fix-SQL libraries — one $99 download.
+Audit and harden a Supabase project from your own machine. No SaaS in the middle — the tool
+talks only to Supabase's own Management API with a token you supply and never persists.
 
 ```
-$ supabase-security <project-ref> --html report.html
+$ supa360 <project-ref> --html report.html
 HTML report written to report.html
 Findings: 0 critical, 5 high, 2 medium
 ```
 
-[![npm](https://img.shields.io/npm/v/supabase-security?color=red)](https://www.npmjs.com/package/supabase-security) [![downloads](https://img.shields.io/npm/dw/supabase-security)](https://www.npmjs.com/package/supabase-security) [![GitHub stars](https://img.shields.io/github/stars/Perufitlife/supabase-security-skill?style=social)](https://github.com/Perufitlife/supabase-security-skill) [![Glama](https://img.shields.io/badge/Glama-approved-blueviolet)](https://glama.ai/mcp/servers/) ![license](https://img.shields.io/badge/license-MIT-green) ![node](https://img.shields.io/badge/node-%3E%3D18-blue)
+Zero runtime dependencies. Node >= 18. MIT.
 
-> **Sister tools** for other BaaS platforms (same `--discover` flag, all MIT):
-> [pocketbase-security](https://www.npmjs.com/package/pocketbase-security) · [appwrite-security](https://www.npmjs.com/package/appwrite-security) · [firebase-security](https://www.npmjs.com/package/firebase-security) · [nhost-security](https://www.npmjs.com/package/nhost-security) · [strapi-security](https://www.npmjs.com/package/strapi-security) · [directus-security](https://www.npmjs.com/package/directus-security) · [convex-security](https://www.npmjs.com/package/convex-security) · [hasura-security](https://www.npmjs.com/package/hasura-security) · [payload-security](https://www.npmjs.com/package/payload-security)
+---
 
-> **Want it done for you?** Three productized services:
-> - [**RLS Audit Friday** — $99 / 24h](https://buy.stripe.com/3cIeVdgikfj47yx9LkcAo0m) — I run the audit on your project + send a PDF report by Friday EOD
-> - [**Vibe-code Security Review** — $199 / 48h](https://buy.stripe.com/bJe00jgik4EqdWV2iScAo0n) — full security review of AI-generated code (Cursor / Claude / v0 / Bolt)
-> - [**Sandbox-as-a-Service** — $499 / 48h](https://buy.stripe.com/aFa7sLc243Amf0Z5v4cAo0l) — custom partner integration sandbox for your API
+## Why we built this
 
-## Why
+**1. Grants and policies drift, and nothing tells you.** A Supabase project accumulates
+`SECURITY DEFINER` functions that are technically callable by `anon`, tables where RLS was
+enabled but the policy is `USING (true)`, storage buckets that accept anonymous writes, and
+default privileges left over from whatever the platform default was the month the project was
+created. None of it announces itself. You find out from the audit or from the incident.
 
-On **May 30, 2026** Supabase changes its default for new projects: tables in `public` no longer auto-expose to the Data API. On **October 30, 2026** that becomes the enforced default for **all existing projects**.
+**2. RLS correctness and RLS *performance* are the same problem.** Supabase's own
+[RLS performance and best practices](https://supabase.com/docs/guides/troubleshooting/rls-performance-and-best-practices-Z5Jjwv)
+guide documents patterns that are easy to get wrong and expensive when you do — and every one of
+them is mechanically detectable. So we detect them:
 
-If you've been on Supabase for more than a few months, you almost certainly have:
-- Tables granted CRUD to `anon` by default (because that was the default).
-- One or two tables where RLS got missed.
-- `SECURITY DEFINER` functions that are technically callable by `anon`.
+| Supabase recommendation | Check here |
+|---|---|
+| Wrap `auth.uid()` / `auth.jwt()` in a subselect so the optimizer builds an `initPlan` and caches it, instead of re-evaluating per row (their measurements: 179 ms → 9 ms, and 178 s → 12 ms on a complex policy) | `rls_unwrapped_auth_fn` |
+| Index the columns your policies filter on when they aren't already a PK or unique (they report >100x on large tables) | `rls_unindexed_policy_column` |
+| Always name the role with `TO authenticated` rather than leaving a policy open to `public` | `rls_policy_public_role` |
+| Restructure policy joins to compare a row column against fixed join data instead of joining per row | `rls_policy_join` |
 
-This tool surfaces all of that in a single HTML report you can share with your team, plus copy-paste SQL to fix each issue.
+A policy that re-evaluates `auth.uid()` for every row is not just slow — under load it is a
+denial-of-service surface. Treating it as a security finding rather than a performance nit is a
+deliberate choice.
 
-## What it finds (real example)
+**3. A security tool that is confidently wrong is worse than none.** Findings here carry a
+`confidence` (`confirmed` vs `inferred`) and evidence you can use to falsify them. When a check
+cannot establish something, it says so explicitly rather than staying silent — silence that reads
+as "you're fine" is the failure mode this tool is most careful about.
 
-I ran this against my own apps. Two projects, similar size:
+## What it does
 
-| Project | Tables | Critical | High | Medium |
-|---|---|---|---|---|
-| Internal CRM (auth-only) | 55 | 0 | 11 | 2 |
-| Public web app | 139 | **17** before fix | 5 | 2 |
+Seven subcommands:
 
-The public app had **17 tables with RLS disabled** and full CRUD to anon. They were leaking to anyone who pulled the anon key out of the JS bundle. Fixed in one SQL transaction generated by this tool.
+| | |
+|---|---|
+| `audit <ref>` | read-only scan; 54 checks across RLS, grants, RPC, storage, edge functions, auth config, extensions, realtime, and the Data API surface |
+| `probe <ref>` | audit with live anonymous probing, so a finding is *confirmed* rather than inferred — **opt-in, and it signs up a throwaway auth user** |
+| `discover [path]` | keyless static scan of a repo (no token needed) |
+| `remediate <result.json>` | consume an audit result and print an ordered fix plan; **dry-run by default**, `--apply` mutates |
+| `verify <remediation.json>` | re-audit after `--apply` and check each fix actually closed |
+| `report <result.json>` | render a shareable HTML report from a prior result |
+| `lab <cmd> <ref>` | seed / teardown / full matrix against a **disposable** project, to prove the checks and their rollbacks against a real Postgres |
+
+Every finding ships copy-paste fix SQL. Findings that can be auto-applied are applied inside a
+per-finding `BEGIN; … COMMIT;` with a pre-apply state snapshot.
 
 ## Install
 
-No install needed — clone and run:
-
 ```bash
-git clone https://github.com/Perufitlife/supabase-security-skill
-cd supabase-security-skill
+git clone https://github.com/fcavalcantirj/secure-my-supa-360
+cd secure-my-supa-360
 SUPABASE_ACCESS_TOKEN=sbp_xxx node scripts/audit.js YOUR_PROJECT_REF --html report.html
 ```
 
-Or as an [Agent Skill](https://agentskills.io/) for Claude Code, Cursor, Cline:
-
-```bash
-# (when published to skills marketplace)
-npx skills add Perufitlife/supabase-security-skill
-```
-
-Then say: "audit my Supabase project ref `xxx`".
-
-## Get a Personal Access Token
-
-`https://supabase.com/dashboard/account/tokens` → "Generate new token". Read access is sufficient.
-
-## Checks performed
-
-| # | Check | Severity |
-|---|---|---|
-| 1 | Table has RLS disabled and anon grants | **CRITICAL** |
-| 2 | SECURITY DEFINER function (non-trigger) executable by anon | HIGH |
-| 3 | Public storage bucket | HIGH |
-| 4 | Default privileges still grant CRUD to anon (future-table risk) | MEDIUM |
-| 5 | Auth signups enabled without email confirmation | MEDIUM |
-| 6 | RLS-locked table still has direct anon grants (defense-in-depth) | LOW |
-
-Every finding ships with copy-paste fix SQL. The HTML report has a "Copy all SQL" button to apply everything in one go.
-
-## How it differs from the alternatives
-
-| | This | SupaExplorer | AuditYourApp |
-|---|---|---|---|
-| Where your project ref goes | Your machine | Their SaaS | Their SaaS |
-| Cost | Free, MIT | $6.75–$187 | $29/mo–$499 |
-| Source code | Public | Closed | Closed |
-| Generates fix SQL | Yes | Pro tier | Pro tier |
-| Runs in CI | Trivially | API tier | API tier |
-
-This is fewer features than the SaaS players. The trade-off is full control of the data and zero recurring cost.
-
-## Run in CI
-
-```yaml
-# .github/workflows/supabase-security.yml
-- run: |
-    npx -y github:Perufitlife/supabase-security-skill \
-      ${{ secrets.SUPABASE_PROJECT_REF }} \
-      --html report.html
-- uses: actions/upload-artifact@v4
-  with: { name: supabase-security-report, path: report.html }
-```
+Get a token at `https://supabase.com/dashboard/account/tokens`. Read access is sufficient for
+`audit`; `remediate --apply` needs write.
 
 ## Remediation
 
-`audit` (above) is read-only. The `remediate` subcommand consumes an audit result and prints a fix plan; **dry-run is the default — nothing mutates without `--apply`**. `--apply` needs a `SUPABASE_ACCESS_TOKEN` plus `--yes` (or a TTY `yes` confirmation).
+`audit` is read-only. `remediate` prints a plan and mutates nothing without `--apply`, which
+additionally requires `--yes` (or a TTY confirmation) and a token.
 
-**Safety gate:** the tool cannot know which of your projects is production, so you declare it. Two tiers, and they are **not** interchangeable:
+**Safety gate.** The tool cannot know which of your projects is production, so you declare it.
+Two tiers, and they are **not** interchangeable:
 
-- `SUPA360_PERMANENT_BLOCKED_REFS` (comma-separated) — **put production here.** These refs can never be remediated or used as a lab; no flag or env combination unblocks them.
-- `SUPA360_BLOCKED_REFS` — disposable **lab** projects. Blocked by default, but unblockable with `SUPA360_LAB_REF=<same ref>` + `--i-understand-this-is-destructive`. Listing production here does **not** protect it.
+- `SUPA360_PERMANENT_BLOCKED_REFS` — **put production here.** These refs can never be remediated
+  or used as a lab; no flag or environment combination unblocks them.
+- `SUPA360_BLOCKED_REFS` — disposable **lab** projects. Blocked by default, but unblockable with
+  `SUPA360_LAB_REF=<same ref>` plus `--i-understand-this-is-destructive`. Listing production here
+  does **not** protect it.
 
-Each finding runs in its own `BEGIN; … COMMIT;` and a pre-apply snapshot is saved for rollback.
-
-Declare them via env, or in a `.supa360.json` at your project root (gitignored — it names real refs, so never commit it):
+Declare them via environment, or in a `.supa360.json` at your project root (gitignored — it names
+real refs, so never commit it):
 
 ```json
 {
@@ -139,44 +94,72 @@ Declare them via env, or in a `.supa360.json` at your project root (gitignored �
 }
 ```
 
-Config and env are UNIONed. A malformed `.supa360.json` is a hard error, not a silent loss of protection.
+Config and environment are unioned. A malformed `.supa360.json` is a hard error, never a silent
+loss of protection.
 
 ```
 SUPA360_PERMANENT_BLOCKED_REFS=my-prod-ref node scripts/remediate.js result.json --apply --yes --token sbp_xxx
 ```
 
+Rollback is generated from the ACL captured immediately **before** each fix, not from a template —
+so undoing a revoke restores exactly the privileges the role held, and never more.
+
+## Run in CI
+
+```yaml
+- name: Audit Supabase
+  env:
+    SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+    SUPA360_PERMANENT_BLOCKED_REFS: ${{ vars.SUPABASE_PROD_REF }}
+  run: |
+    git clone --depth 1 https://github.com/fcavalcantirj/secure-my-supa-360 /tmp/supa360
+    node /tmp/supa360/scripts/cli.js audit "${{ vars.SUPABASE_PROJECT_REF }}" \
+      --fail-on critical --html report.html
+- uses: actions/upload-artifact@v4
+  if: always()
+  with: { name: supabase-security-report, path: report.html }
+```
+
+Exit codes: `0` clean, `2` findings at or above `--fail-on`, `10` auth, `11` network, `12` tool error.
+
+> `action.yml` in this repo is **not yet usable from another repository**: its checkout step takes
+> no `repository:` input, so it checks out the *caller's* repo and then runs `scripts/cli.js`, a
+> path only this repo has. Use the `run:` form above until that is fixed.
+
 ## Limits — read these before trusting it
 
-- Doesn't audit per-object Storage RLS (would mean iterating every file).
-- Can't revoke `supabase_admin` default privileges via SQL — that needs the Dashboard toggle. The report tells you so.
-- App APIs that are intentionally exposed to anon (e.g. a `get_public_stats()` RPC) will appear as findings. **You decide which are intentional.**
-- Alpha. If you find a false positive or missed check, open an issue with the SQL output of the relevant `pg_*` query and I'll fix it.
+- Most findings are **inferred** from catalog metadata, not proven by execution. `--probe` proves
+  them, but it is opt-in precisely because it signs up a real auth user and calls your RPCs.
+- Column-grant findings are reported only when a role can read a column while lacking table-level
+  `SELECT`. A column grant under an existing table grant is a Postgres no-op and is deliberately
+  not reported here — that exposure belongs to the RLS checks.
+- The `SECURITY DEFINER` body analyzer grades an internal auth check as `strong` / `weak` / `none`
+  by reading the function source. A `weak` grade means the tool could not establish a guard — it is
+  not a claim that the function is unguarded.
+- Storage is audited at bucket and policy level, not per object.
+- `supabase_admin`-owned default privileges cannot be revoked via SQL; the report tells you which
+  Dashboard toggle to use.
+- Intentionally public RPCs and tables will appear as findings. **You decide which are intentional**
+  — use `.supa360.json` suppressions to record that decision.
 
-## Roadmap
+## Tests
 
-- [ ] Storage object-level scan
-- [ ] `pg_cron` scheduled-job audit
-- [ ] Edge Function secrets scan (env var leak detection)
-- [ ] Apify actor wrapper (one-click HTML report, no install)
-- [ ] MCP server with `audit` and `apply-fix` tools (preview + rollback)
+```bash
+node --test test/*.test.js
+```
 
+738 tests, no network. The unit suite is necessary and not sufficient: correctness of the
+remediation and rollback paths is proven by `lab matrix` against a real disposable Postgres,
+because every serious defect this project has fixed passed a green unit suite at the moment it
+was wrong.
 
-## Integration pattern reference
+## Credits and license
 
-See [`rotatepilot-skyx-sandbox`](https://github.com/Perufitlife/rotatepilot-skyx-sandbox) for a live demo of how a partner consumes one of our public REST APIs in a single static page — built 12-may-2026 in response to an aviation-platform partnership inbound. Same JSON-contract / CORS / edge-served approach we use for `supabase-security` integrations.
+MIT. This project is a fork of
+[Perufitlife/supabase-security-skill](https://github.com/Perufitlife/supabase-security-skill) by
+Renzo Madueno, which is the original work and remains under his copyright; see `LICENSE`, which
+retains both notices.
 
-## Sister AI text tools
-
-If your team writes outreach, PR descriptions, or social posts with AI, the [aitells](https://aitells.vercel.app) ecosystem catches the fingerprints before they ship:
-
-- [`@perufitlife/aitells-mcp`](https://www.npmjs.com/package/@perufitlife/aitells-mcp) — MCP server for Claude Code / Cursor. `detect_ai_tells` + `humanize_text` as native tools.
-- [`Perufitlife/aitells-action`](https://github.com/Perufitlife/aitells-action) — GitHub Action that scans PR titles/bodies/commits for AI patterns. Posts friendly summary comment.
-- [aitells.vercel.app](https://aitells.vercel.app) — free detector + $19 lifetime humanizer (first 100 buyers)
-
-## License
-
-MIT.
-
----
-
-📚 Part of [**Awesome Backend Security Auditors**](https://github.com/Perufitlife/awesome-backend-security) — the full collection of keyless active-probe auditors.
+This fork reorganized the checks into separate modules, added the remediation and rollback engine
+with state-captured (rather than templated) rollback, the disposable-lab harness and matrix, the
+two-tier production-ref protection, and the test suite.
