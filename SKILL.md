@@ -325,13 +325,20 @@ The full schema is at `schema/finding.schema.json` — validated on every run.
 - **`supabase_admin` privilege gaps:** Some findings (e.g. default privileges owned by `supabase_admin`) cannot be fixed via SQL — `postgres` is not a member of `supabase_admin`. These emit a `dashboard_action` instead of failing SQL. **Action required:** toggle the setting in the Supabase Dashboard (Data API → "Automatically expose new tables" = OFF).
 - **`SUPABASE_DB_URL`:** Only used for direct-DB remediation mode (optional). When omitted, all fixes go through the Management API. The DB password is never logged or stored.
 
+## Scan scope
+
+| Flag | Effect |
+|---|---|
+| `--discover [path]` | Keyless static scan of a repo — no token, no project ref. |
+| `--include-system-schemas` | Include Supabase platform schemas (`storage`, `realtime`, `auth`, `vault`, `pg_*`, `pgsodium`, `_realtime`, `_analytics`) in enumeration. **Default: off** — those are vendor-controlled, and the dedicated storage/realtime checks query their own tables directly, so excluding them loses no user-actionable finding. |
+
 ## Suppression (intentional exposure)
 
 Create `.supa360.json` in your project root to suppress findings you've reviewed and intentionally accepted:
 
 ```jsonc
 {
-  "suppress": [
+  "suppressions": [
     { "check": "storage_bucket_public", "target": "bucket:brand-assets", "reason": "Public CDN bucket, intentional" }
   ]
 }
@@ -343,4 +350,4 @@ Suppressed findings still appear in the JSON output with `suppressed: true` and 
 
 Canonical command: `node --test` (auto-discovers all `test/*.test.js`). Do **not** use `node --test test/` — it is broken in this Node version (resolves the directory as a module).
 
-The golden harness (`test/golden-harness.test.js`) is the regression gate: it runs the full audit → remediate → verify cycle against `fixtures/seed.sql` (a deliberately vulnerable state) with injected transports — no live DB required for the unit tests. A live run against a throwaway Supabase ref is parked behind a flag (see `--live-golden` in audit tests).
+The golden harness (`test/golden-harness.test.js`) is the regression gate: it runs the full audit → remediate → verify cycle against `fixtures/seed.sql` (a deliberately vulnerable state) with injected transports — no live DB required for the unit tests. A live run against a throwaway Supabase project is done with `lab matrix` (see the `lab` subcommand), not with a flag on the unit suite.
