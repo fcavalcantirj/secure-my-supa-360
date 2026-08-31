@@ -142,7 +142,7 @@ finding exists.
 
 | Check ID | Severity | Confidence | How | Fix Type | Rollback | Restore-From-Captured |
 |---|---|---|---|---|---|---|
-| `anon_historical_read_critical` | CRITICAL | confirmed | pg_stat_statements shows anon SELECT with rows>0 against a table currently holding data | SQL (REVOKE SELECT) | Yes | Yes (exact: captured ACL) |
+| `anon_historical_read` | CRITICAL | confirmed | pg_stat_statements shows anon SELECT with rows>0 against a table currently holding data | SQL (REVOKE SELECT) | Yes | Yes (exact: captured ACL) |
 | `anon_historical_write` | HIGH | confirmed | pg_stat_statements shows anon INSERT/UPDATE/DELETE executed with rows>0 | SQL (REVOKE INSERT/UPDATE/DELETE) | Yes | Yes (exact: captured ACL) |
 | `anon_historical_enumeration` | HIGH → CRITICAL | confirmed | Anon LIMIT/OFFSET without WHERE returned rows — bulk table hoovering; escalates to critical when the table currently holds data | SQL (REVOKE SELECT) | Yes | Yes (exact: captured ACL) |
 
