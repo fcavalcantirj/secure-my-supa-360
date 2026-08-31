@@ -9,9 +9,9 @@ metadata:
 
 # Supabase Security Skill (360° Auditor)
 
-A pure-Node.js audit + remediation toolkit for Supabase projects — **zero dependencies, runs locally, your token never leaves your machine.** Passive metadata scan by default (read-only); `--probe` opt-in for live confirmation. **68 checks** across 15 categories.
+A pure-Node.js audit + remediation toolkit for Supabase projects — **zero dependencies, runs locally, your token never leaves your machine.** Passive metadata scan by default (read-only); `--probe` opt-in for live confirmation. **70 checks** across 15 categories.
 
-## What it checks (68 checks)
+## What it checks (70 checks)
 
 Each finding is classified as **confirmed** (a live probe proved the leak) or **inferred** (metadata/grant analysis only). Active probing (`--probe`) POSTs to RPC/storage endpoints and signs up a temporary auth user — it is OPT-IN and automatically tears down the probe user on exit. Default mode is **passive** (read-only metadata scan, no network writes).
 
@@ -84,6 +84,8 @@ finding exists.
 | `weak_password_policy` | MEDIUM | inferred | Password minimum length < 8 | Management API (PATCH) | Yes | Yes (exact: original length) |
 | `no_captcha_on_auth` | MEDIUM | inferred | CAPTCHA disabled on auth endpoints | Management API (PATCH) / Dashboard | Yes | Yes (exact: original config) |
 | `auth_hibp_disabled` | MEDIUM | inferred | HIBP password breach checking disabled | Management API (PATCH) | Yes | Yes (exact: original setting) |
+| `auth_otp_expiry_too_long` | MEDIUM | inferred | Emailed OTP expiry above the 3600s the Supabase Production Checklist recommends — widens the window an intercepted mail stays usable | Management API (`mailer_otp_exp: 3600`) | Yes | Yes (exact: prior value) |
+| `auth_no_custom_smtp` | MEDIUM | inferred | No custom SMTP: auth mail comes from Supabase's shared sender (users cannot verify the domain) and is rate limited, default 2/hour | Dashboard only (needs YOUR provider credentials) | No | n/a |
 | `auth_mfa_disabled` | HIGH | inferred | MFA not enforced | Dashboard | Yes | Yes (dashboard toggle) |
 | `auth_jwt_exp_too_long` | MEDIUM | inferred | JWT expiration > 8 hours (28800s) | Management API (PATCH) | Yes | Yes (exact: original exp) |
 | `auth_redirect_allowlist_open` | HIGH | inferred | Empty URI allowlist (open redirect) | Management API (PATCH) | Yes | Yes (exact: original list) |

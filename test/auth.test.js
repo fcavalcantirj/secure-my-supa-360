@@ -144,6 +144,8 @@ test("analyzeAuthConfig golden fixture (spec test step 4): weak config yields ex
   const checks = findings.map((f) => f.check).sort();
   assert.deepEqual(checks, [
     "auth_hibp_disabled",
+    // The fixture configures no SMTP, so the Production Checklist item fires.
+    "auth_no_custom_smtp",
     "auth_rate_limit_missing",
     "auth_redirect_allowlist_open",
     "auth_signups_enabled_no_confirm",
@@ -197,4 +199,41 @@ test("auth scan round-trip: normalize -> assembleResult -> schema valid + no sec
   const json1 = JSON.stringify(assembleResult(opts), null, 2);
   const json2 = JSON.stringify(assembleResult(opts), null, 2);
   assert.equal(json1, json2, "output must be deterministic");
+});
+
+// === Supabase Production Checklist coverage (2026-08-31) ===
+// https://supabase.com/docs/guides/deployment/going-into-prod
+
+test("auth_otp_expiry_too_long: fires above the checklist's 3600s recommendation", () => {
+  const over = analyzeAuthConfig({ mailer_otp_exp: 86400, smtp_host: "smtp.example.com" }, REF);
+  const f = over.find((x) => x.check === "auth_otp_expiry_too_long");
+  assert.ok(f, "expected a finding for a 24h OTP");
+  assert.equal(f.evidence.mailer_otp_exp, 86400);
+  assert.equal(f.evidence.recommended_max, 3600);
+  assert.equal(f.fix.management_api_action.body.mailer_otp_exp, 3600);
+  assert.equal(f.fix.rollback_management_api_action.body.mailer_otp_exp, 86400,
+    "rollback must restore the ACTUAL prior value, never a default");
+});
+
+test("auth_otp_expiry_too_long: silent at or below 3600", () => {
+  for (const v of [3600, 900, 60]) {
+    const out = analyzeAuthConfig({ mailer_otp_exp: v, smtp_host: "smtp.example.com" }, REF);
+    assert.ok(!out.some((x) => x.check === "auth_otp_expiry_too_long"), `${v}s must not fire`);
+  }
+});
+
+test("auth_no_custom_smtp: fires when smtp_host is absent, blank, or null", () => {
+  for (const host of [undefined, null, "", "   "]) {
+    const out = analyzeAuthConfig({ smtp_host: host }, REF);
+    assert.ok(out.some((x) => x.check === "auth_no_custom_smtp"), `smtp_host=${JSON.stringify(host)} must fire`);
+  }
+});
+
+test("auth_no_custom_smtp: silent when SMTP is configured, and is dashboard-only", () => {
+  const out = analyzeAuthConfig({ smtp_host: "smtp.sendgrid.net" }, REF);
+  assert.ok(!out.some((x) => x.check === "auth_no_custom_smtp"));
+  const f = analyzeAuthConfig({ smtp_host: "" }, REF).find((x) => x.check === "auth_no_custom_smtp");
+  assert.equal(f.fix.management_api_action, null,
+    "configuring SMTP needs credentials only the operator has — must not be an auto-fix");
+  assert.ok(f.fix.dashboard_action.includes("SMTP"));
 });

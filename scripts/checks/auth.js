@@ -141,6 +141,59 @@ export function analyzeAuthConfig(config, ref = "unknown") {
     ));
   }
 
+  // 9. OTP expiry too long. Supabase's Production Checklist: "Set the OTP expiry to a
+  //    reasonable value" and explicitly recommends 3600 seconds or lower. A long-lived
+  //    emailed OTP widens the window for an intercepted or forwarded mail to be used.
+  //    https://supabase.com/docs/guides/deployment/going-into-prod
+  if (typeof config.mailer_otp_exp === "number" && config.mailer_otp_exp > 3600) {
+    findings.push(makeFinding(
+      "auth_otp_expiry_too_long",
+      "medium",
+      "auth:otp",
+      {
+        mailer_otp_exp: config.mailer_otp_exp,
+        recommended_max: 3600,
+        source: "Supabase Production Checklist",
+      },
+      mgmtFix(ref, { mailer_otp_exp: 3600 }, { mailer_otp_exp: config.mailer_otp_exp })
+    ));
+  }
+
+  // 10. No custom SMTP. Production Checklist lists this under BOTH Security ("so your
+  //     users can see that the mails are coming from a trusted domain") and Availability
+  //     ("full control over transactional email deliverability"). It also has a hard
+  //     operational edge: without custom SMTP the shared sender is rate limited to
+  //     rate_limit_email_sent per hour (default 2), so confirmations and password resets
+  //     are throttled long before real usage.
+  //     Dashboard-only: configuring SMTP needs credentials only the operator has —
+  //     the same reason the CAPTCHA fix is not an auto-fix.
+  {
+    const smtpHost = typeof config.smtp_host === "string" ? config.smtp_host.trim() : "";
+    if (!smtpHost) {
+      findings.push(makeFinding(
+        "auth_no_custom_smtp",
+        "medium",
+        "auth:smtp",
+        {
+          smtp_host: config.smtp_host ?? null,
+          rate_limit_email_sent: config.rate_limit_email_sent ?? null,
+          reason:
+            "Auth emails are sent from Supabase's shared sender and are rate limited (default 2/hour). Users cannot verify the sending domain.",
+          source: "Supabase Production Checklist",
+        },
+        {
+          sql: [],
+          rollback_sql: [],
+          dashboard_action:
+            "Dashboard -> Project Settings -> Authentication -> SMTP Settings: configure YOUR SMTP provider (SendGrid, AWS SES, Resend, ...) and sender domain",
+          management_api_action: null,
+          rollback_management_api_action: null,
+          requires_service_role: false,
+        }
+      ));
+    }
+  }
+
   // 8. Open redirect allowlist (empty array = accepts any redirect URI)
   if (Array.isArray(config.uri_allow_list) && config.uri_allow_list.length === 0) {
     findings.push(makeFinding(

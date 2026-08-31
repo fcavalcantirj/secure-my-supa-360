@@ -212,6 +212,18 @@ const CHECKS = {
     title: "MFA not enforced",
     explain: "Multi-factor authentication is not required. Account takeover via stolen passwords is trivial.",
   },
+  auth_otp_expiry_too_long: {
+    severity: "medium",
+    category: "coverage-auth",
+    title: "Emailed OTP expiry longer than recommended",
+    explain: "Supabase's Production Checklist recommends an OTP expiry of 3600 seconds or lower. A longer-lived code widens the window in which an intercepted or forwarded email can still be used to sign in.",
+  },
+  auth_no_custom_smtp: {
+    severity: "medium",
+    category: "coverage-auth",
+    title: "No custom SMTP server configured",
+    explain: "Auth emails are sent from Supabase's shared sender, so users cannot verify the sending domain, and the shared sender is rate limited (default 2 emails/hour) — password resets and confirmations throttle before real usage. Supabase's Production Checklist lists custom SMTP under both Security and Availability.",
+  },
   auth_jwt_exp_too_long: {
     severity: "medium",
     category: "coverage-auth",

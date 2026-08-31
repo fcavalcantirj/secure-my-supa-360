@@ -38,6 +38,35 @@ mechanically detectable, so we detect them:
 A policy re-evaluating `auth.uid()` for every row is not a performance nit — under load it is a
 denial-of-service surface. Reporting it as a security finding is deliberate.
 
+## Supabase's own Production Checklist
+
+The mechanically-checkable items from
+[Supabase's Production Checklist](https://supabase.com/docs/guides/deployment/going-into-prod)
+map to checks here. Where Supabase names a specific threshold, we use theirs:
+
+| Checklist item | Check |
+|---|---|
+| Enable RLS on all tables | `rls_disabled`, `rls_no_policies_with_anon_grants` |
+| Turn on SSL enforcement | `db_ssl_disabled` |
+| Enable network restrictions | `db_no_network_restrictions` |
+| Enable email confirmations | `auth_signups_enabled_no_confirm` |
+| Set OTP expiry to 3600s or lower | `auth_otp_expiry_too_long` |
+| Enable leaked-password protection | `auth_hibp_disabled` |
+| Set up MFA for your users | `auth_mfa_disabled` |
+| Enable CAPTCHA on signup / sign-in / reset | `no_captcha_on_auth` |
+| Use a custom SMTP server | `auth_no_custom_smtp` |
+| Suitable indices for common query patterns | `rls_unindexed_policy_column` |
+| Review rate limits | `auth_rate_limit_missing` |
+
+Deliberately **not** covered, because they are operational rather than detectable from a
+project's configuration: PITR and read replicas, load testing, plan tier, organization
+owners and org-wide MFA enforcement, and notifying support ahead of traffic surges. Run the
+checklist yourself for those — this tool does not replace it.
+
+Supabase also ships Security Advisor and Performance Advisor in the dashboard, which
+overlap with parts of this. They are worth running too; this tool adds remediation with
+verified rollback, `pg_stat_statements` history forensics, and CI exit codes.
+
 ## What's different from the original
 
 | | Original (at fork point) | Here |
