@@ -203,9 +203,11 @@ function tableStateQuery(schemaName, relName) {
  * @param {string} ref — project ref
  * @param {object} finding — the finding object (must have .check, .target, .fix)
  * @param {function} dbFn — injectable: (query) => Promise<rows[]>
+ * @param {object} [opts] — { aclOnly?: boolean } — true skips non-ACL fixes (remediate's
+ *   generate path). Default false captures every SQL fix (lab's verify path).
  * @returns {Promise<object|null>} captured state object, or null if not capturable
  */
-export async function captureState(token, ref, finding, dbFn) {
+export async function captureState(token, ref, finding, dbFn, opts = {}) {
   if (!dbFn) return null;
   const fix = finding.fix || {};
   const hasSql = Array.isArray(fix.sql) && fix.sql.some((s) => isExecutableSql(s));
@@ -213,12 +215,24 @@ export async function captureState(token, ref, finding, dbFn) {
 
   const sqlStr = Array.isArray(fix.sql) ? fix.sql.join(" ") : "";
 
-  // Only capture state for findings whose fix touches ACLs (REVOKE/GRANT/ALTER DEFAULT PRIVILEGES).
-  // RLS-only fixes (ENABLE ROW LEVEL SECURITY) don't need ACL capture — their rollback
-  // (DISABLE ROW LEVEL SECURITY) is the exact inverse regardless of ACL state.
-  // This avoids a DB round-trip for non-ACL findings.
+  // Two callers, two contracts — do NOT collapse them:
+  //
+  //   remediate (aclOnly: true)  — needs state only to GENERATE exact rollback SQL, which
+  //     is meaningful only for ACL changes. An RLS-only fix rolls back via its exact
+  //     inverse (DISABLE ROW LEVEL SECURITY) regardless of ACL, so skipping the round-trip
+  //     is a safe optimization there.
+  //   lab matrix (default)       — needs state to VERIFY rollback exactness for EVERY fixed
+  //     check by comparing pre/post state. Applying the ACL filter here silently turns
+  //     "verified exact" into "n/a" for every non-ACL fix.
+  //
+  // Regression this guards (2026-08-31): the ACL filter was applied unconditionally and
+  // dropped lab matrix from 8/9 to 4/9 rollback_exact — rls_disabled, function_no_search_path,
+  // function_secdef_no_search_path and storage_bucket_misconfigured all went unverified,
+  // while the summary still reported "0 mismatch". A verifier that silently verifies
+  // nothing is the defect class this project keeps repeating.
+  const { aclOnly = false } = opts;
   const hasAclOperation = /REVOKE|GRANT|ALTER DEFAULT PRIVILEGES/i.test(sqlStr);
-  if (!hasAclOperation) return null;
+  if (aclOnly && !hasAclOperation) return null;
 
   const target = finding.target;
   const check = finding.check;

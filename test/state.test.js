@@ -190,7 +190,12 @@ test("captureState: returns null for non-SQL fixes", async () => {
   assert.equal(state, null);
 });
 
-test("captureState: returns null for RLS-only SQL (no ACL operation)", async () => {
+// captureState serves two callers with DIFFERENT contracts. Asserting only the
+// aclOnly behaviour is what let the 2026-08-31 regression through: lab matrix fell
+// from 8/9 to 4/9 rollback_exact while every test stayed green and the summary still
+// said "0 mismatch". Both contracts are pinned below.
+
+test("captureState (aclOnly): returns null for RLS-only SQL, no DB round-trip", async () => {
   const finding = {
     check: "rls_disabled",
     target: "leaky_table",
@@ -198,9 +203,40 @@ test("captureState: returns null for RLS-only SQL (no ACL operation)", async () 
   };
   let called = false;
   const dbFn = async () => { called = true; return []; };
-  const state = await captureState("token", "ref", finding, dbFn);
+  // remediate's generate path: rollback for an RLS-only fix is its exact inverse,
+  // so skipping the query is a safe optimization THERE.
+  const state = await captureState("token", "ref", finding, dbFn, { aclOnly: true });
   assert.equal(state, null);
-  assert.equal(called, false, "must NOT query DB for RLS-only fixes");
+  assert.equal(called, false, "aclOnly must NOT query DB for RLS-only fixes");
+});
+
+test("captureState (default): DOES capture RLS-only SQL — lab must verify every fix", async () => {
+  const finding = {
+    check: "rls_disabled",
+    target: "leaky_table",
+    fix: { sql: ["ALTER TABLE public.leaky_table ENABLE ROW LEVEL SECURITY;"] },
+  };
+  let called = false;
+  const dbFn = async () => {
+    called = true;
+    return [{ state: { schema: "public", relname: "leaky_table", relacl: null, rls: false, policies: [] } }];
+  };
+  const state = await captureState("token", "ref", finding, dbFn);
+  assert.equal(called, true, "verify path MUST query DB for non-ACL fixes");
+  assert.ok(state, "non-ACL fixes must still yield comparable state");
+  assert.equal(state.rls, false, "captured state must carry the property the fix changes");
+});
+
+test("captureState (default): captures a bucket-config fix (UPDATE storage.buckets)", async () => {
+  const finding = {
+    check: "storage_bucket_misconfigured",
+    target: "bucket:docs",
+    fix: { sql: ["UPDATE storage.buckets SET file_size_limit = 5242880 WHERE id = 'docs';"] },
+  };
+  const dbFn = async () => [{ state: { id: "docs", public: false, file_size_limit: 1024, allowed_mime_types: null } }];
+  const state = await captureState("token", "ref", finding, dbFn);
+  assert.ok(state, "bucket-config fixes must be capturable — their template rollback is lossy");
+  assert.equal(state.file_size_limit, 1024);
 });
 
 test("captureState: captures table relacl for REVOKE-based table finding", async () => {

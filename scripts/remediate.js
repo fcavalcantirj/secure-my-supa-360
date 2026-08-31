@@ -550,7 +550,9 @@ export async function remediate(result, opts = {}) {
       let rollbackSqlExact = null;
       let rollbackExact = false;
       if (token && ref) {
-        capturedState = await captureState(token, ref, item, dbFn);
+        // aclOnly: this path only needs state to GENERATE rollback SQL, which is
+        // meaningful for ACL changes only. lab's verify path deliberately omits it.
+        capturedState = await captureState(token, ref, item, dbFn, { aclOnly: true });
         if (capturedState) {
           rollbackSqlExact = generateRollbackFromState(capturedState, item);
           rollbackExact = rollbackSqlExact && rollbackSqlExact.length > 0;

@@ -473,13 +473,23 @@ export async function runMatrix(token, ref, opts = {}) {
     rollback_exact: matrix.filter((m) => m.rollback_exact === true).length,
     rollback_mismatch: matrix.filter((m) => m.rollback_exact === false).length,
     not_applicable: matrix.filter((m) => m.rollback_exact === null).length,
+    // A check that was FIXED but whose rollback could not be verified. Distinct from
+    // not_applicable, which mostly counts checks that were never fixed. Conflating the
+    // two is how the 2026-08-31 regression hid: rollback_exact fell 8 -> 4 while the
+    // headline still read "0 mismatch". Unverified is a FAILURE, not a neutral state.
+    rollback_unverified: matrix.filter((m) => m.fixed && m.rollback_exact === null).length,
     teardown_clean: teardownClean,
     pre_seed_teardown_clean: preSeedTeardown
       ? (preSeedTeardown.errors.length === 0 && (preSeedTeardown.bucket_deleted || !preSeedTeardown.bucket_existed))
       : null,
   };
 
-  console.error(`lab: matrix complete — ${summary.detected} detected, ${summary.fixed} fixed, ${summary.rollback_exact} rollback-exact, ${summary.rollback_mismatch} mismatch, ${summary.not_applicable} n/a, teardown: ${teardownClean}`);
+  console.error(`lab: matrix complete — ${summary.detected} detected, ${summary.fixed} fixed, ${summary.rollback_exact} rollback-exact, ${summary.rollback_mismatch} mismatch, ${summary.rollback_unverified} UNVERIFIED, ${summary.not_applicable} n/a, teardown: ${teardownClean}`);
+  if (summary.rollback_unverified > 0) {
+    const names = matrix.filter((m) => m.fixed && m.rollback_exact === null).map((m) => m.check).join(", ");
+    console.error(`lab: FAIL — ${summary.rollback_unverified} fixed check(s) had NO rollback verification: ${names}`);
+    console.error("lab: a fix whose rollback cannot be verified is not proven reversible — treat as a failure, not as n/a.");
+  }
 
   return { matrix, summary };
 }
@@ -558,6 +568,9 @@ Safety:
     } else if (command === "matrix") {
       const result = await runMatrix(token, ref);
       if (!result.summary.teardown_clean) teardownErrors = 1;
+      // An unverified or mismatched rollback fails the matrix. Exiting 0 here would
+      // let "we verified nothing" pass for "we verified everything".
+      if (result.summary.rollback_unverified > 0 || result.summary.rollback_mismatch > 0) teardownErrors = 1;
       console.log(JSON.stringify(result, null, 2));
     }
     // Non-zero exit if anything failed (Bug 5: don't exit 0 with errors in output)
