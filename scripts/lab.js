@@ -308,6 +308,58 @@ export async function runMatrix(token, ref, opts = {}) {
     throw new Error(`lab matrix: seed did not produce SQL-seedable checks: ${missingList}. Fix seed.sql or the check.`);
   }
 
+  // NEGATIVE CONTROLS (2026-08-31). A fixture that only asserts "the vulnerable state
+  // IS detected" cannot catch a check that fires on everything — and two checks did
+  // exactly that: column_grant_exposes_column reported every readable column of every
+  // readable table, and the auth-check classifier read a bare `user_id` as a guard.
+  // These assert state that must produce NO finding. If one fires, the check is
+  // over-reporting and the matrix fails.
+  const NEGATIVE_CONTROLS = [
+    {
+      check: "column_grant_exposes_column",
+      match: (f) => String(f.target).includes("billing_ledger"),
+      why: "billing_ledger grants anon table-level SELECT, so the column grant is not a bypass and revoking it would be a Postgres no-op",
+    },
+    {
+      check: "function_secdef_missing_auth_check",
+      match: (f) => String(f.target).includes("fn_strong_guard"),
+      why: "fn_strong_guard has a real (select auth.uid()) guard and must not be reported as unguarded",
+    },
+  ];
+  const controlViolations = [];
+  for (const c of NEGATIVE_CONTROLS) {
+    const hit = beforeFindings.find((f) => f.check === c.check && c.match(f));
+    if (hit) controlViolations.push(`${c.check} fired on ${hit.target} — ${c.why}`);
+  }
+  if (controlViolations.length > 0) {
+    throw new Error(`lab matrix: NEGATIVE CONTROL failed (check is over-reporting):\n  - ${controlViolations.join("\n  - ")}`);
+  }
+
+  // POSITIVE CONTROLS: state whose GRADE matters, not just its presence.
+  const gradeViolations = [];
+  const weak = beforeFindings.find(
+    (f) => f.check === "function_secdef_missing_auth_check" && String(f.target).includes("fn_weak_guard")
+  );
+  if (!weak) {
+    gradeViolations.push("fn_weak_guard produced no missing_auth_check finding — a bare `user_id` mention must never read as guarded");
+  } else if (!weak.evidence || !weak.evidence.auth_check) {
+    // Strict on purpose: a soft "skip if absent" would pass silently the moment the
+    // grade stopped reaching the artifact — which is exactly what happened when
+    // check-module `details` were dropped in normalization.
+    gradeViolations.push("fn_weak_guard finding carries no evidence.auth_check — the grade is not reaching the output");
+  } else if (weak.evidence.auth_check !== "weak") {
+    gradeViolations.push(`fn_weak_guard graded '${weak.evidence.auth_check}', expected 'weak'`);
+  }
+  const acceptedAt = beforeFindings.find(
+    (f) => f.check === "column_grant_exposes_column" && String(f.target).includes("accepted_at")
+  );
+  if (acceptedAt && acceptedAt.severity === "critical") {
+    gradeViolations.push("user_profiles.accepted_at graded CRITICAL — 'accepted_at' is not an address; substring matching on 'cep' has regressed");
+  }
+  if (gradeViolations.length > 0) {
+    throw new Error(`lab matrix: GRADE control failed:\n  - ${gradeViolations.join("\n  - ")}`);
+  }
+
   // Phase 2.5: Capture pre-apply DB state for each finding (WO-19 Bug 1 —
   // state-based rollback verification, not just finding presence).
   // This catches the WO-5 class of bug: rollback restores the finding while

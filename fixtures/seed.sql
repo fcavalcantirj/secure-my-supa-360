@@ -104,10 +104,62 @@ CREATE TABLE public.user_profiles (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   email text NOT NULL,        -- sensitive
   phone text,                 -- sensitive
-  full_name text
+  full_name text,
+  accepted_at timestamptz     -- NOT sensitive: substring "cep" must not classify it as an address
 );
 ALTER TABLE public.user_profiles ENABLE ROW LEVEL SECURITY;
-GRANT SELECT (id, email) ON public.user_profiles TO anon;  -- leaks email even with RLS
+-- No table-level grant: these are genuine column-level bypasses.
+GRANT SELECT (id, email, accepted_at) ON public.user_profiles TO anon;
+
+-- 7b. WEAK auth-check grade (2026-08-31). The body mentions `user_id` — a PARAMETER
+--     name, not an authorization check. A binary regex read that as "guarded" and
+--     stayed silent; the graded classifier must report it as weak.
+CREATE OR REPLACE FUNCTION public.fn_weak_guard(p_user_id uuid)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  UPDATE public.user_profiles SET full_name = 'x' WHERE id::text = p_user_id::text;
+  RETURN;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.fn_weak_guard(uuid) TO anon;
+
+-- 7c. NEGATIVE CONTROL — STRONG auth-check grade. A real guard. This function must
+--     NOT produce function_secdef_missing_auth_check. Without this control, a
+--     classifier that flagged everything would still look "green".
+CREATE OR REPLACE FUNCTION public.fn_strong_guard()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF (select auth.uid()) IS NULL THEN
+    RAISE EXCEPTION 'unauthorized' USING ERRCODE = 'P0001';
+  END IF;
+  UPDATE public.user_profiles SET full_name = 'y' WHERE id = 1;
+  RETURN;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.fn_strong_guard() TO anon;
+
+-- 7d. NEGATIVE CONTROL — column grant UNDER an existing table grant. has_column_privilege()
+--     returns true here purely because the TABLE grant implies every column, so this is
+--     NOT a column-level bypass and revoking the column would be a Postgres no-op.
+--     column_grant_exposes_column must stay SILENT on this table.
+CREATE TABLE public.billing_ledger (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  owner_id uuid,
+  amount numeric NOT NULL
+);
+ALTER TABLE public.billing_ledger ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "billing_ledger_owner" ON public.billing_ledger
+  FOR SELECT TO authenticated USING ((select auth.uid()) = owner_id);
+GRANT SELECT ON public.billing_ledger TO anon;
+GRANT SELECT (amount) ON public.billing_ledger TO anon;
 
 -- 8. Custom exposed schema (Data API exposes things it shouldn't).
 CREATE SCHEMA custom_integration;

@@ -9,12 +9,15 @@ DROP TABLE IF EXISTS public.public_notes CASCADE;
 DROP TABLE IF EXISTS public.comments CASCADE;
 DROP TABLE IF EXISTS public.user_profiles CASCADE;
 DROP TABLE IF EXISTS public.tenant_data CASCADE;
+DROP TABLE IF EXISTS public.billing_ledger CASCADE;
 
 -- 2. Drop the security-definer view (drop table first via CASCADE, then explicit)
 DROP VIEW IF EXISTS public.v_tenant_data;
 
 -- 3. Drop the security-definer function
 DROP FUNCTION IF EXISTS public.attach_company_admin(uuid) CASCADE;
+DROP FUNCTION IF EXISTS public.fn_weak_guard(uuid) CASCADE;
+DROP FUNCTION IF EXISTS public.fn_strong_guard() CASCADE;
 
 -- 4. Drop the custom schema (table + grants)
 DROP SCHEMA IF EXISTS custom_integration CASCADE;
