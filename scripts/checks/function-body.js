@@ -4,16 +4,36 @@
 //
 // Spec coverage (entry 10):
 //  - analyze secdef functions executable by anon/authenticated (the dangerous set)
-//  - Flag absence of internal auth check (auth.uid/jwt/role, current_setting,
-//    is_admin, get_my_, company_id/tenant_id/user_id references)
+//  - Grade the internal auth check as strong/weak/none (NOT a binary flag):
+//    strong = auth.uid/jwt/role, get_my_, is_admin; weak = bare current_setting/
+//    company_id/tenant_id/user_id (a column/param name, NOT a guard); none = no signal.
+//    weak & none are flagged (weak at reduced severity) — a weak mention must never
+//    read as "safe" (the bug: target_user_id / company_id-as-column passed silently).
 //  - Flag missing SET search_path (search_path injection) — complements the
 //    existing function_no_search_path check with body-analysis context
 //  - Flag dynamic SQL (EXECUTE/format) built from arguments without quoting
 //    (EXECUTE without USING, or format() with %s and no %I/%L)
 
-// Patterns that indicate an internal authorization check is present in the body.
-const AUTH_CHECK_RE =
-  /auth\.uid\(\)|auth\.jwt\(\)|auth\.role\(\)|current_setting\(|get_my_|is_admin\(|company_id|tenant_id|user_id/i;
+// Grade the authorization check in a SECURITY DEFINER body. A single binary
+// "present/absent" regex is unsafe — company_id/tenant_id/user_id are column/parameter
+// names that match but are NOT authorization checks, so weak guards read as safe. We
+// grade instead and flag everything that isn't strongly guarded.
+//   strong — auth.uid(), auth.jwt(), auth.role(), get_my_*, is_admin(...) (real auth context)
+//   weak   — only a bare identity-ish mention (current_setting(, company_id, tenant_id,
+//            user_id): no strong guard could be established -> flagged, reduced severity
+//   none   — no auth signal at all -> critical
+const STRONG_AUTH_CHECK_RE = /auth\.uid\(\)|auth\.jwt\(\)|auth\.role\(\)|get_my_|is_admin\(/i;
+const WEAK_AUTH_CHECK_RE = /current_setting\(|company_id|tenant_id|user_id/i;
+
+// Explicit, testable grade for a function body's auth check. Exported so every
+// anon-executable SECURITY DEFINER function gets a grade (strong/weak/none) instead
+// of relying on a boolean regex match that silently misclassifies weak refs.
+export function classifyAuthCheck(body) {
+  const b = body || "";
+  if (STRONG_AUTH_CHECK_RE.test(b)) return "strong";
+  if (WEAK_AUTH_CHECK_RE.test(b)) return "weak";
+  return "none";
+}
 
 // Check proconfig (pg_proc.proconfig) for a SET search_path entry.
 export function hasSearchPath(config) {
@@ -59,15 +79,26 @@ export function analyzeFunctionBody(fn) {
   const { function_name, schema_name, body, config } = fn;
   const findings = [];
 
-  // 1. Missing internal auth check
-  if (!AUTH_CHECK_RE.test(body || "")) {
+  // 1. Grade the internal auth check (strong/weak/none). A strong guard means the
+  //    function is genuinely authorized — no finding (the positive "not flagged" case).
+  //    weak & none are flagged; weak at reduced severity so a bare company_id/user_id
+  //    reference can never silently read as "safe" (the bug this fixes).
+  const authCheck = classifyAuthCheck(body);
+  if (authCheck !== "strong") {
     findings.push({
       check: "function_secdef_missing_auth_check",
       category: "coverage-rpc",
-      severity: "critical",
+      severity: authCheck === "weak" ? "high" : "critical",
       confidence: "inferred",
       target: function_name,
-      details: { has_auth_check: false, body_preview: (body || "").slice(0, 500) },
+      details: {
+        auth_check: authCheck, // "weak" | "none" — explicit grade on every emitted auth finding
+        has_auth_check: false,
+        ...(authCheck === "weak"
+          ? { auth_check_reason: "body references an identity-ish identifier (current_setting/company_id/tenant_id/user_id) but no strong auth guard (auth.uid/jwt/role/is_admin/get_my_); cannot confirm the function is authorized" }
+          : {}),
+        body_preview: (body || "").slice(0, 500),
+      },
       fix: {
         sql: [
           `-- Add an internal authorization check inside the body, e.g. (best practice: (select auth.uid())):`,

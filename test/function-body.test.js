@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   analyzeFunctionBody,
   analyzeFunctionBodies,
+  classifyAuthCheck,
   hasSearchPath,
   detectDynamicSql,
 } from "../scripts/checks/function-body.js";
@@ -116,4 +117,77 @@ test("analyzeFunctionBodies: filters to secdef + anon/auth-executable, flattens 
   assert.equal(findings.length, 1);
   assert.equal(findings[0].check, "function_secdef_missing_auth_check");
   assert.equal(findings[0].target, "no_auth_check");
+});
+
+// === #4: graded auth-check signal (strong/weak/none) ===
+// The old AUTH_CHECK_RE matched `user_id`/`company_id` as "guards", so weak refs
+// read as safe and were silently absent from output. These four bodies assert the
+// three tiers (weak appears twice — the exact bug class being fixed).
+
+const BODY_NONE =
+  "BEGIN UPDATE accounts SET bal = bal - amount WHERE id = 'x'; RETURN; END;";
+const BODY_WEAK_PARAM =
+  "BEGIN UPDATE notes SET owner_id = target_user_id WHERE id = 1; RETURN; END;"; // target_user_id is a param, not a guard
+const BODY_WEAK_COL =
+  "BEGIN INSERT INTO notes (company_id, data) VALUES (1, 'x'); RETURN; END;"; // company_id as an INSERT column, not a guard
+const BODY_STRONG =
+  "BEGIN IF (select auth.uid()) IS NULL THEN RAISE EXCEPTION 'forbidden' USING ERRCODE = 'P0001'; END IF; UPDATE notes SET data = 'x'; RETURN; END;";
+
+test("#4 classifyAuthCheck: grades the four reference bodies (none / weak / weak / strong)", () => {
+  assert.equal(classifyAuthCheck(BODY_NONE), "none");
+  assert.equal(classifyAuthCheck(BODY_WEAK_PARAM), "weak", "target_user_id is a param name, not an auth guard");
+  assert.equal(classifyAuthCheck(BODY_WEAK_COL), "weak", "company_id as a column is not an auth guard");
+  assert.equal(classifyAuthCheck(BODY_STRONG), "strong", "real auth.uid() guard");
+});
+
+test("#4 classifyAuthCheck: empty/undefined body -> none (no false strong signal)", () => {
+  assert.equal(classifyAuthCheck(""), "none");
+  assert.equal(classifyAuthCheck(undefined), "none");
+});
+
+test("#4: weak ref (target_user_id) is FLAGGED, not silent — evidence.auth_check='weak', reduced severity", () => {
+  const fn = {
+    function_name: "promote_to_admin", schema_name: "public", prosecdef: true,
+    config: ["search_path=public"], body: BODY_WEAK_PARAM, anon_execute: true, auth_execute: false,
+  };
+  const findings = analyzeFunctionBody(fn);
+  const miss = findings.find((f) => f.check === "function_secdef_missing_auth_check");
+  assert.ok(miss, "a weak guard must emit a finding (was silently absent by the bug)");
+  assert.equal(miss.severity, "high", "weak = reduced severity, not critical");
+  assert.equal(miss.details.auth_check, "weak");
+  assert.ok(/cannot confirm the function is authorized/.test(miss.details.auth_check_reason));
+});
+
+test("#4: weak ref (company_id as column) is FLAGGED, not silent", () => {
+  const fn = {
+    function_name: "write_note", schema_name: "public", prosecdef: true,
+    config: ["search_path=public"], body: BODY_WEAK_COL, anon_execute: true, auth_execute: false,
+  };
+  const findings = analyzeFunctionBody(fn);
+  const miss = findings.find((f) => f.check === "function_secdef_missing_auth_check");
+  assert.ok(miss, "company_id-as-column must emit a finding (was silently absent by the bug)");
+  assert.equal(miss.details.auth_check, "weak");
+  assert.equal(miss.severity, "high");
+});
+
+test("#4: a strong guard emits NO missing_auth_check finding (positive 'not flagged')", () => {
+  const fn = {
+    function_name: "is_authorized", schema_name: "public", prosecdef: true,
+    config: ["search_path=public"], body: BODY_STRONG, anon_execute: true, auth_execute: false,
+  };
+  const findings = analyzeFunctionBody(fn);
+  assert.equal(findings.find((f) => f.check === "function_secdef_missing_auth_check"), undefined);
+  assert.equal(findings.length, 0, "strong guard + search_path + no dynamic SQL -> no findings");
+});
+
+test("#4: a true missing guard (none) stays critical with evidence.auth_check='none'", () => {
+  const fn = {
+    function_name: "blind_write", schema_name: "public", prosecdef: true,
+    config: ["search_path=public"], body: BODY_NONE, anon_execute: true, auth_execute: false,
+  };
+  const findings = analyzeFunctionBody(fn);
+  const miss = findings.find((f) => f.check === "function_secdef_missing_auth_check");
+  assert.ok(miss);
+  assert.equal(miss.severity, "critical");
+  assert.equal(miss.details.auth_check, "none");
 });
