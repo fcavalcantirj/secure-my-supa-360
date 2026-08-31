@@ -1,65 +1,66 @@
 # secure-my-supa-360
 
-Audit and harden a Supabase project from your own machine. No SaaS in the middle — the tool
-talks only to Supabase's own Management API with a token you supply and never persists.
+Audits a Supabase project for exposure — RLS, grants, anon-callable RPCs, storage, edge functions,
+auth config — and generates the SQL to close what it finds. Runs from your machine against
+Supabase's own Management API. No third-party service, zero runtime dependencies, Node >= 18.
 
-```
-$ supa360 <project-ref> --html report.html
-HTML report written to report.html
-Findings: 0 critical, 5 high, 2 medium
-```
+## Where this came from
 
-Zero runtime dependencies. Node >= 18. MIT.
+Forked from **[Perufitlife/supabase-security-skill](https://github.com/Perufitlife/supabase-security-skill)**
+by Renzo Madueno (MIT). That project is the origin of this one and remains under his copyright —
+`LICENSE` retains both notices.
 
----
+We forked rather than contributed upstream because what we needed changed the shape of the thing:
+the original is a single-file auditor that reports, and we needed one that **remediates and can
+prove its remediation is reversible** — which meant a check/remediate/rollback architecture, a
+disposable-lab harness to test the write path against a real Postgres, and a test suite. That is a
+different project, not a patch.
 
-## Why we built this
+## Why we built it
 
-**1. Grants and policies drift, and nothing tells you.** A Supabase project accumulates
-`SECURITY DEFINER` functions that are technically callable by `anon`, tables where RLS was
-enabled but the policy is `USING (true)`, storage buckets that accept anonymous writes, and
-default privileges left over from whatever the platform default was the month the project was
-created. None of it announces itself. You find out from the audit or from the incident.
+**Grants and policies drift silently.** A Supabase project accumulates `SECURITY DEFINER` functions
+technically callable by `anon`, tables where RLS is on but the policy is `USING (true)`, buckets
+that accept anonymous writes, default privileges left from whatever the platform default was when
+the project was created. Nothing announces any of it. You learn it from an audit or from an incident.
 
-**2. RLS correctness and RLS *performance* are the same problem.** Supabase's own
+**RLS correctness and RLS performance are the same problem.** Supabase's own
 [RLS performance and best practices](https://supabase.com/docs/guides/troubleshooting/rls-performance-and-best-practices-Z5Jjwv)
-guide documents patterns that are easy to get wrong and expensive when you do — and every one of
-them is mechanically detectable. So we detect them:
+guide documents patterns that are easy to get wrong and expensive when you do — and every one is
+mechanically detectable, so we detect them:
 
-| Supabase recommendation | Check here |
+| Supabase recommends | Check |
 |---|---|
-| Wrap `auth.uid()` / `auth.jwt()` in a subselect so the optimizer builds an `initPlan` and caches it, instead of re-evaluating per row (their measurements: 179 ms → 9 ms, and 178 s → 12 ms on a complex policy) | `rls_unwrapped_auth_fn` |
-| Index the columns your policies filter on when they aren't already a PK or unique (they report >100x on large tables) | `rls_unindexed_policy_column` |
-| Always name the role with `TO authenticated` rather than leaving a policy open to `public` | `rls_policy_public_role` |
-| Restructure policy joins to compare a row column against fixed join data instead of joining per row | `rls_policy_join` |
+| Wrap `auth.uid()` / `auth.jwt()` in a subselect so the optimizer builds an `initPlan` and caches it instead of re-evaluating per row — their measurements: 179 ms → 9 ms, and 178 s → 12 ms on a complex policy | `rls_unwrapped_auth_fn` |
+| Index policy columns that aren't already a PK or unique — they report >100x on large tables | `rls_unindexed_policy_column` |
+| Name the role with `TO authenticated`; never leave a policy open to `public` | `rls_policy_public_role` |
+| Restructure policy joins to compare a row column against fixed join data rather than joining per row | `rls_policy_join` |
 
-A policy that re-evaluates `auth.uid()` for every row is not just slow — under load it is a
-denial-of-service surface. Treating it as a security finding rather than a performance nit is a
-deliberate choice.
+A policy re-evaluating `auth.uid()` for every row is not a performance nit — under load it is a
+denial-of-service surface. Reporting it as a security finding is deliberate.
 
-**3. A security tool that is confidently wrong is worse than none.** Findings here carry a
-`confidence` (`confirmed` vs `inferred`) and evidence you can use to falsify them. When a check
-cannot establish something, it says so explicitly rather than staying silent — silence that reads
-as "you're fine" is the failure mode this tool is most careful about.
+## What's different from the original
 
-## What it does
+| | Original (at fork point) | Here |
+|---|---|---|
+| Script files | 5 | 32 |
+| Check modules | none — one monolithic `audit.js` | 18 modules under `scripts/checks/` |
+| Distinct checks emitted | 11 | 54 |
+| Tests | none | 36 files |
+| Remediation | — | `remediate` with per-finding `BEGIN; … COMMIT;` and a pre-apply snapshot |
+| Rollback | — | generated from the ACL **captured before** each fix, never from a template |
+| Verification | — | `verify` re-audits after apply; `lab matrix` proves detect → fix → rollback against a real disposable Postgres |
+| Production safety | — | two-tier ref protection; a permanent-tier ref cannot be remediated or used as a lab under any flag or env |
+| Output contract | ad-hoc JSON | `schema/finding.schema.json`, per-finding `confidence`, evidence you can falsify |
 
-Seven subcommands:
+Two behaviours worth calling out because they change what a finding *means*:
 
-| | |
-|---|---|
-| `audit <ref>` | read-only scan; 54 checks across RLS, grants, RPC, storage, edge functions, auth config, extensions, realtime, and the Data API surface |
-| `probe <ref>` | audit with live anonymous probing, so a finding is *confirmed* rather than inferred — **opt-in, and it signs up a throwaway auth user** |
-| `discover [path]` | keyless static scan of a repo (no token needed) |
-| `remediate <result.json>` | consume an audit result and print an ordered fix plan; **dry-run by default**, `--apply` mutates |
-| `verify <remediation.json>` | re-audit after `--apply` and check each fix actually closed |
-| `report <result.json>` | render a shareable HTML report from a prior result |
-| `lab <cmd> <ref>` | seed / teardown / full matrix against a **disposable** project, to prove the checks and their rollbacks against a real Postgres |
+- **Rollback restores exactly what was there.** A templated rollback can grant a role privileges it
+  never held. Ours reads the live ACL immediately before mutating and restores that.
+- **Silence is never a safety claim.** Where a check cannot establish something, it says so — e.g.
+  the `SECURITY DEFINER` body analyzer grades an internal auth check `strong` / `weak` / `none`
+  rather than emitting nothing and letting absence read as "fine".
 
-Every finding ships copy-paste fix SQL. Findings that can be auto-applied are applied inside a
-per-finding `BEGIN; … COMMIT;` with a pre-apply state snapshot.
-
-## Install
+## Run it
 
 ```bash
 git clone https://github.com/fcavalcantirj/secure-my-supa-360
@@ -67,44 +68,21 @@ cd secure-my-supa-360
 SUPABASE_ACCESS_TOKEN=sbp_xxx node scripts/audit.js YOUR_PROJECT_REF --html report.html
 ```
 
-Get a token at `https://supabase.com/dashboard/account/tokens`. Read access is sufficient for
-`audit`; `remediate --apply` needs write.
+Token: `https://supabase.com/dashboard/account/tokens`. Read access is enough for `audit`.
 
-## Remediation
+| Subcommand | |
+|---|---|
+| `audit <ref>` | read-only scan |
+| `probe <ref>` | audit + live anonymous probing, so findings are *confirmed* rather than inferred — **opt-in; it signs up a throwaway auth user** |
+| `discover [path]` | keyless static scan of a repo |
+| `remediate <result.json>` | fix plan; **dry-run by default**, `--apply` mutates |
+| `verify <remediation.json>` | re-audit and confirm each fix closed |
+| `report <result.json>` | HTML report from a prior result |
+| `lab <cmd> <ref>` | seed / teardown / matrix against a **disposable** project |
 
-`audit` is read-only. `remediate` prints a plan and mutates nothing without `--apply`, which
-additionally requires `--yes` (or a TTY confirmation) and a token.
+Exit codes: `0` clean, `2` findings at or above `--fail-on`, `10` auth, `11` network, `12` tool error.
 
-**Safety gate.** The tool cannot know which of your projects is production, so you declare it.
-Two tiers, and they are **not** interchangeable:
-
-- `SUPA360_PERMANENT_BLOCKED_REFS` — **put production here.** These refs can never be remediated
-  or used as a lab; no flag or environment combination unblocks them.
-- `SUPA360_BLOCKED_REFS` — disposable **lab** projects. Blocked by default, but unblockable with
-  `SUPA360_LAB_REF=<same ref>` plus `--i-understand-this-is-destructive`. Listing production here
-  does **not** protect it.
-
-Declare them via environment, or in a `.supa360.json` at your project root (gitignored — it names
-real refs, so never commit it):
-
-```json
-{
-  "permanent_blocked_refs": ["your-production-ref"],
-  "blocked_refs": ["your-disposable-lab-ref"]
-}
-```
-
-Config and environment are unioned. A malformed `.supa360.json` is a hard error, never a silent
-loss of protection.
-
-```
-SUPA360_PERMANENT_BLOCKED_REFS=my-prod-ref node scripts/remediate.js result.json --apply --yes --token sbp_xxx
-```
-
-Rollback is generated from the ACL captured immediately **before** each fix, not from a template —
-so undoing a revoke restores exactly the privileges the role held, and never more.
-
-## Run in CI
+### In CI
 
 ```yaml
 - name: Audit Supabase
@@ -115,32 +93,39 @@ so undoing a revoke restores exactly the privileges the role held, and never mor
     git clone --depth 1 https://github.com/fcavalcantirj/secure-my-supa-360 /tmp/supa360
     node /tmp/supa360/scripts/cli.js audit "${{ vars.SUPABASE_PROJECT_REF }}" \
       --fail-on critical --html report.html
-- uses: actions/upload-artifact@v4
-  if: always()
-  with: { name: supabase-security-report, path: report.html }
 ```
 
-Exit codes: `0` clean, `2` findings at or above `--fail-on`, `10` auth, `11` network, `12` tool error.
+> `action.yml` is **not yet usable from another repository** — its checkout step takes no
+> `repository:` input, so it checks out the caller's repo and then runs `scripts/cli.js`, a path
+> only this repo has. Use the `run:` form above.
 
-> `action.yml` in this repo is **not yet usable from another repository**: its checkout step takes
-> no `repository:` input, so it checks out the *caller's* repo and then runs `scripts/cli.js`, a
-> path only this repo has. Use the `run:` form above until that is fixed.
+## Safety gate
 
-## Limits — read these before trusting it
+The tool cannot know which of your projects is production, so you declare it. Two tiers, **not**
+interchangeable:
+
+- `SUPA360_PERMANENT_BLOCKED_REFS` — **production goes here.** Never remediated, never usable as a
+  lab; no flag or env combination unblocks it.
+- `SUPA360_BLOCKED_REFS` — disposable lab projects. Blocked by default, unblockable with
+  `SUPA360_LAB_REF=<same ref>` plus `--i-understand-this-is-destructive`. Production listed here is
+  **not** protected.
+
+Either can be declared in a gitignored `.supa360.json` (`permanent_blocked_refs` /
+`blocked_refs`), unioned with the env vars. A malformed config is a hard error, never a silent loss
+of protection.
+
+## Limits
 
 - Most findings are **inferred** from catalog metadata, not proven by execution. `--probe` proves
-  them, but it is opt-in precisely because it signs up a real auth user and calls your RPCs.
-- Column-grant findings are reported only when a role can read a column while lacking table-level
-  `SELECT`. A column grant under an existing table grant is a Postgres no-op and is deliberately
-  not reported here — that exposure belongs to the RLS checks.
-- The `SECURITY DEFINER` body analyzer grades an internal auth check as `strong` / `weak` / `none`
-  by reading the function source. A `weak` grade means the tool could not establish a guard — it is
-  not a claim that the function is unguarded.
+  them, and is opt-in because it signs up a real auth user and calls your RPCs.
+- Column-grant findings appear only when a role can read a column while lacking table-level
+  `SELECT`. A column grant under an existing table grant is a Postgres no-op and is not reported.
+- A `weak` auth-check grade means the tool could not establish a guard — not that none exists.
 - Storage is audited at bucket and policy level, not per object.
-- `supabase_admin`-owned default privileges cannot be revoked via SQL; the report tells you which
-  Dashboard toggle to use.
-- Intentionally public RPCs and tables will appear as findings. **You decide which are intentional**
-  — use `.supa360.json` suppressions to record that decision.
+- `supabase_admin`-owned default privileges can't be revoked via SQL; the report names the
+  Dashboard toggle.
+- Intentionally public RPCs and tables will appear. You decide which are intentional — record that
+  in `.supa360.json` suppressions.
 
 ## Tests
 
@@ -148,18 +133,10 @@ Exit codes: `0` clean, `2` findings at or above `--fail-on`, `10` auth, `11` net
 node --test test/*.test.js
 ```
 
-738 tests, no network. The unit suite is necessary and not sufficient: correctness of the
-remediation and rollback paths is proven by `lab matrix` against a real disposable Postgres,
-because every serious defect this project has fixed passed a green unit suite at the moment it
-was wrong.
+No network. Necessary and not sufficient: the remediation and rollback paths are proven
+by `lab matrix` against a real disposable Postgres, because every serious defect this project has
+fixed passed a green unit suite at the moment it was wrong.
 
-## Credits and license
+## License
 
-MIT. This project is a fork of
-[Perufitlife/supabase-security-skill](https://github.com/Perufitlife/supabase-security-skill) by
-Renzo Madueno, which is the original work and remains under his copyright; see `LICENSE`, which
-retains both notices.
-
-This fork reorganized the checks into separate modules, added the remediation and rollback engine
-with state-captured (rather than templated) rollback, the disposable-lab harness and matrix, the
-two-tier production-ref protection, and the test suite.
+MIT — see `LICENSE`, which retains both the original copyright (Renzo Madueno) and this fork's.
