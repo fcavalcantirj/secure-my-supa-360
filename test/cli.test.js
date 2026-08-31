@@ -375,3 +375,30 @@ test("cli.js lab seed on a blocked ref with a DIFFERENT SUPA360_LAB_REF exits 12
   assert.equal(result.status, 12, "a non-matching lab ref must not unblock a blocked ref");
   assert.match(result.stderr || "", /BLOCKED/, "must say BLOCKED on stderr");
 });
+
+// === `probe` subcommand must forward the project ref (2026-08-31) ===
+// audit.js reads the ref as args[0]. The dispatcher prepended "--probe", so the flag
+// was parsed as the ref and every `probe <ref>` invocation died on a documented
+// subcommand. Asserting on the message, not just the exit code, because several
+// different failures share exit code 12.
+
+test("cli.js probe <ref> forwards the ref (does not parse the flag as the ref)", () => {
+  const env = { ...process.env };
+  delete env.SUPABASE_ACCESS_TOKEN;
+  const result = spawnSync(CLI, [...CLI_ARGS, "probe", "deadbeefdeadbeefdead"], {
+    encoding: "utf8", maxBuffer: 1024 * 1024, env,
+  });
+  const out = (result.stdout || "") + (result.stderr || "");
+  assert.ok(!out.includes("provide a project ref as the first argument"),
+    "probe must forward the ref to audit.js, not a leading flag");
+});
+
+test("cli.js audit <ref> still forwards the ref", () => {
+  const env = { ...process.env };
+  delete env.SUPABASE_ACCESS_TOKEN;
+  const result = spawnSync(CLI, [...CLI_ARGS, "audit", "deadbeefdeadbeefdead"], {
+    encoding: "utf8", maxBuffer: 1024 * 1024, env,
+  });
+  const out = (result.stdout || "") + (result.stderr || "");
+  assert.ok(!out.includes("provide a project ref as the first argument"));
+});

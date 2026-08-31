@@ -217,8 +217,11 @@ async function run() {
     case "probe":
       // 'probe' is an alias for 'audit' with active probing ON by default.
       // Only add --probe if the user hasn't explicitly set --probe or --no-probe.
+      // APPEND, never prepend: audit.js reads the project ref as args[0], so a
+      // leading flag is parsed as the ref and the command dies with
+      // "provide a project ref as the first argument".
       if (!restArgs.includes("--probe") && !restArgs.includes("--no-probe")) {
-        process.argv = [process.argv[0], process.argv[1], "--probe", ...restArgs];
+        process.argv = [process.argv[0], process.argv[1], ...restArgs, "--probe"];
       } else {
         process.argv = [process.argv[0], process.argv[1], ...restArgs];
       }
