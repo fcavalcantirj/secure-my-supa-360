@@ -95,7 +95,12 @@ export function normalizeFinding(raw) {
     severity: raw.severity || "info",
     confidence: raw.confidence || "inferred",
     target: raw.target || "unknown",
-    evidence: raw.evidence || {},
+    // Check modules are inconsistent: some build `evidence`, some build `details`
+    // (function-body.js uses `details` exclusively). Reading only `evidence` silently
+    // dropped both — 55 findings shipped `evidence: {}`, including every
+    // function_secdef_missing_auth_check, whose auth_check grade and body_preview are
+    // the only way a human can adjudicate the most severe check in the tool.
+    evidence: raw.evidence || raw.details || {},
     fix: {
       sql: Array.isArray(fix.sql) ? fix.sql : (fix.sql ? [String(fix.sql)] : []),
       rollback_sql: Array.isArray(fix.rollback_sql) ? fix.rollback_sql : (fix.rollback_sql ? [String(fix.rollback_sql)] : []),

@@ -592,3 +592,33 @@ test("errors array is accepted in schema (fault isolation)", () => {
   const { valid, errors: violations } = validate(result, schema);
   assert.equal(valid, true, `schema violations: ${JSON.stringify(violations)}`);
 });
+
+// === details -> evidence (2026-08-31) ===
+// Check modules are inconsistent about the key they build. Reading only `evidence`
+// dropped `details` on the floor: function_secdef_missing_auth_check shipped
+// `evidence: {}`, so its auth_check grade never reached any consumer.
+
+test("normalizeFinding: falls back to raw.details when a check builds details", () => {
+  const f = normalizeFinding({
+    check: "function_secdef_missing_auth_check",
+    target: "promote_to_admin",
+    severity: "high",
+    details: { auth_check: "weak", reason: "only a bare user_id mention" },
+  });
+  assert.equal(f.evidence.auth_check, "weak");
+  assert.equal(f.evidence.reason, "only a bare user_id mention");
+});
+
+test("normalizeFinding: explicit evidence still wins over details", () => {
+  const f = normalizeFinding({
+    check: "x", target: "t",
+    evidence: { a: 1 },
+    details: { b: 2 },
+  });
+  assert.deepEqual(f.evidence, { a: 1 });
+});
+
+test("normalizeFinding: neither present -> empty object, not undefined", () => {
+  const f = normalizeFinding({ check: "x", target: "t" });
+  assert.deepEqual(f.evidence, {});
+});
