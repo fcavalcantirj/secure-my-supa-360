@@ -27,3 +27,6 @@ fixtures/remediation_snapshot_*.json
 
 # operator ref-protection config — may name real production refs
 .supa360.json
+
+# lab config snapshots — name a real project ref
+fixtures/lab_config_snapshot_*.json

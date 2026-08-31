@@ -89,7 +89,22 @@ export function analyzeAuthConfig(config, ref = "unknown") {
       "medium",
       "auth:captcha",
       { security_captcha_enabled: false },
-      mgmtFix(ref, { security_captcha_enabled: true, security_captcha_provider: "hcaptcha", security_captcha_secret: "<your_secret>" }, { security_captcha_enabled: config.security_captcha_enabled })
+      // DASHBOARD-ONLY on purpose. Enabling captcha requires a provider secret the
+      // tool cannot know. The previous auto-fix PATCHed the literal string
+      // "<your_secret>" into the project's live auth config and enabled captcha with
+      // it — which breaks sign-up for real users — and its rollback restored only
+      // security_captcha_enabled, leaving the bogus provider and secret behind.
+      // A fix that needs a value only the operator has is a dashboard action, not an
+      // auto-fix.
+      {
+        sql: [],
+        rollback_sql: [],
+        dashboard_action:
+          "Dashboard -> Authentication -> Attack Protection -> enable CAPTCHA, choose a provider (hCaptcha/Turnstile) and paste YOUR provider secret",
+        management_api_action: null,
+        rollback_management_api_action: null,
+        requires_service_role: false,
+      }
     ));
   }
 

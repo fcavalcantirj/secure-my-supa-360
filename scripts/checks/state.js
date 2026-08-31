@@ -208,10 +208,12 @@ function tableStateQuery(schemaName, relName) {
  * @returns {Promise<object|null>} captured state object, or null if not capturable
  */
 export async function captureState(token, ref, finding, dbFn, opts = {}) {
+  const { mgmtFn } = opts;
   if (!dbFn) return null;
   const fix = finding.fix || {};
   const hasSql = Array.isArray(fix.sql) && fix.sql.some((s) => isExecutableSql(s));
-  if (!hasSql) return null; // non-SQL fixes can't be verified via DB state
+  const hasMgmt = !!(fix.management_api_action && fix.management_api_action.path && mgmtFn);
+  if (!hasSql && !hasMgmt) return null; // nothing verifiable
 
   const sqlStr = Array.isArray(fix.sql) ? fix.sql.join(" ") : "";
 
@@ -231,6 +233,25 @@ export async function captureState(token, ref, finding, dbFn, opts = {}) {
   // while the summary still reported "0 mismatch". A verifier that silently verifies
   // nothing is the defect class this project keeps repeating.
   const { aclOnly = false } = opts;
+
+  // Management-API (config) fixes mutate project settings, not the database. Without
+  // this branch captureState returned null for them, so the lab could never verify a
+  // config rollback — it reported rollback_exact: null, which reads as "n/a" rather
+  // than "unverified". Capture exactly the fields the fix will PATCH.
+  const mgmt = finding.fix && finding.fix.management_api_action;
+  if (mgmt && mgmt.path && mgmt.body && typeof mgmt.body === "object" && mgmtFn) {
+    try {
+      const current = await mgmtFn("GET", mgmt.path);
+      if (!current || typeof current !== "object") return null;
+      const captured = {};
+      for (const k of Object.keys(mgmt.body)) captured[k] = current[k];
+      // Never widen this to the whole response: config endpoints carry secrets.
+      return { config_path: mgmt.path, config: captured };
+    } catch {
+      return null;
+    }
+  }
+
   const hasAclOperation = /REVOKE|GRANT|ALTER DEFAULT PRIVILEGES/i.test(sqlStr);
   if (aclOnly && !hasAclOperation) return null;
 

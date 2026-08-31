@@ -11,13 +11,13 @@
 // are present. The env var alone never suffices; naming one blocked ref never
 // unblocks a different one.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { audit } from "./audit.js";
 import {
-  remediate, rollbackRemediation, isBlockedRef, dbQuery, refHash, envNamesRef,
+  remediate, rollbackRemediation, isBlockedRef, dbQuery, refHash, envNamesRef, mgmtRequest,
   PERMANENT_BLOCKED_REF_HASHES, LAB_ELIGIBLE_REF_HASHES, isExecutableSql,
 } from "./remediate.js";
 import { EXIT_CODES } from "./contract.js";
@@ -118,15 +118,147 @@ function readSqlFixture(path) {
 }
 
 /** Apply fixtures/seed.sql to the lab project (single SQL batch). */
+
+
+const CONFIG_SNAPSHOT_PREFIX = "fixtures/lab_config_snapshot_";
+
+/** Newest config snapshot written by seedLab, or null. */
+function readNewestConfigSnapshot() {
+  try {
+    const dir = "fixtures";
+    const files = readdirSync(dir)
+      .filter((f) => f.startsWith("lab_config_snapshot_") && f.endsWith(".json"))
+      .sort();
+    if (!files.length) return null;
+    return JSON.parse(readFileSync(`${dir}/${files[files.length - 1]}`, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// === Config-level lab seeding (2026-08-31) =============================
+// SQL can only create the DB-level half of a vulnerable project. Auth policy and the
+// Data API surface are project CONFIG, so the checks that read them had never been
+// exercised against real Supabase — the same blind spot that let the flagship RLS
+// check ship dead (its fixture never produced the state it asserted).
+//
+// Only the fields we mutate are captured. The postgrest GET also returns `jwt_secret`;
+// snapshotting the whole object would persist a live secret to disk.
+// Must cover EVERY auth field the tool's own fixes can PATCH, not just the ones the
+// lab weakens — otherwise `remediate --apply` mutates a field the restore never puts
+// back, and teardown reports clean while the project has drifted. Derived from the
+// mgmtFix() bodies and prior-value reads in scripts/checks/auth.js.
+// Deliberately a curated list, not the whole /config/auth object: that response
+// carries secrets (captcha secret, SMTP password) and this snapshot is written to disk.
+const AUTH_SEED_FIELDS = [
+  // weakened by the lab
+  "password_min_length",
+  "password_required_characters",
+  "password_hibp_enabled",
+  "mailer_autoconfirm",
+  "disable_signup",
+  "security_captcha_enabled",
+  // additionally patchable by the tool's own auto-fixes
+  "external_anonymous_users_enabled",
+  "mfa_enabled",
+  "jwt_exp",
+  "uri_allow_list",
+];
+
+const WEAK_AUTH_CONFIG = {
+  password_min_length: 6,
+  password_required_characters: "",
+  password_hibp_enabled: false,
+  mailer_autoconfirm: true,      // signups auto-confirm -> auth_signups_enabled_no_confirm
+  disable_signup: false,
+  security_captcha_enabled: false,
+};
+
+/** Capture ONLY the config fields the lab mutates. */
+export async function captureLabConfig(token, ref) {
+  const snap = { auth: {}, postgrest: {} };
+  try {
+    const auth = await mgmtRequest(token, "GET", `/v1/projects/${ref}/config/auth`);
+    for (const k of AUTH_SEED_FIELDS) snap.auth[k] = auth[k];
+  } catch (e) {
+    snap.auth_error = e.message;
+  }
+  try {
+    const pg = await mgmtRequest(token, "GET", `/v1/projects/${ref}/postgrest`);
+    snap.postgrest.db_schema = pg.db_schema;   // deliberately NOT the whole object
+  } catch (e) {
+    snap.postgrest_error = e.message;
+  }
+  return snap;
+}
+
+/** Apply the deliberately weak config. Returns which checks it is meant to trigger. */
+export async function seedLabConfig(token, ref) {
+  const applied = [];
+  try {
+    await mgmtRequest(token, "PATCH", `/v1/projects/${ref}/config/auth`, WEAK_AUTH_CONFIG);
+    applied.push("auth");
+  } catch (e) {
+    console.error(`lab: config seed (auth) failed — ${e.message}`);
+  }
+  try {
+    // Expose the seeded custom schema through the Data API. This is what makes
+    // custom_schema_exposed testable at all; it is config, not SQL, which is why the
+    // matrix previously reported it UNTESTABLE.
+    await mgmtRequest(token, "PATCH", `/v1/projects/${ref}/postgrest`, {
+      db_schema: "public,custom_integration",
+    });
+    applied.push("postgrest");
+  } catch (e) {
+    console.error(`lab: config seed (postgrest) failed — ${e.message}`);
+  }
+  return applied;
+}
+
+/** Restore captured config. Best-effort but LOUD — a lab left with open signup matters. */
+export async function restoreLabConfig(token, ref, snap) {
+  const errors = [];
+  if (snap && snap.auth && Object.keys(snap.auth).length) {
+    try {
+      await mgmtRequest(token, "PATCH", `/v1/projects/${ref}/config/auth`, snap.auth);
+    } catch (e) { errors.push(`auth: ${e.message}`); }
+  }
+  if (snap && snap.postgrest && snap.postgrest.db_schema !== undefined) {
+    try {
+      await mgmtRequest(token, "PATCH", `/v1/projects/${ref}/postgrest`, {
+        db_schema: snap.postgrest.db_schema,
+      });
+    } catch (e) { errors.push(`postgrest: ${e.message}`); }
+  }
+  if (errors.length) {
+    console.error(`lab: CONFIG RESTORE FAILED — ${errors.join("; ")}`);
+    console.error("lab: the project may be left with weakened auth config. Restore it by hand.");
+  }
+  return { restored: errors.length === 0, errors };
+}
+
 export async function seedLab(token, ref) {
+  // Capture and PERSIST config BEFORE mutating anything. If this process dies between
+  // the PATCH and the restore, the snapshot on disk is the only way back — the same
+  // reason remediate captures ACL state before it applies a fix.
+  const configSnapshot = await captureLabConfig(token, ref);
+  const snapshotPath = `${CONFIG_SNAPSHOT_PREFIX}${Date.now()}.json`;
+  try {
+    writeFileSync(snapshotPath, JSON.stringify({ ref, captured_at: new Date().toISOString(), config: configSnapshot }, null, 2));
+    console.error(`lab: config snapshot written to ${snapshotPath}`);
+  } catch (e) {
+    throw new Error(`lab: refusing to seed — could not write config snapshot (${e.message}). Without it a crash leaves the project weakened with no record of the original settings.`);
+  }
+
   const sql = readSqlFixture(SEED_PATH);
   try {
     await dbQuery(token, ref, sql);
   } catch (e) {
     throw new Error(`lab: seed SQL failed: ${e.message || String(e)}`);
   }
-  console.error(`lab: seeded ${SEED_PATH} onto ${ref}`);
-  return { seeded: true, ref, lines: sql.split("\n").length };
+  const appliedConfig = await seedLabConfig(token, ref);
+  console.error(`lab: seeded ${SEED_PATH} onto ${ref} (config seeded: ${appliedConfig.join(", ") || "none"})`);
+  return { seeded: true, ref, lines: sql.split("\n").length, config_seeded: appliedConfig, config_snapshot: snapshotPath };
 }
 
 /** Split SQL into individual statements (naive splitter: splits on `;` at line start). */
@@ -223,7 +355,18 @@ export async function teardownLab(token, ref) {
       console.error(`  - ${err.statement}: ${err.error}`);
     }
   }
-  console.error(`lab: teardown complete — ${results.results.length - results.errors.length}/${results.results.length} SQL steps, bucket_deleted=${results.bucket_deleted}`);
+  // Restore project config from the newest snapshot written by seedLab.
+  const snap = readNewestConfigSnapshot();
+  if (snap) {
+    const r = await restoreLabConfig(token, ref, snap.config);
+    results.config_restored = r.restored;
+    if (!r.restored) results.errors.push({ statement: "restore project config", error: r.errors.join("; ") });
+    else console.error("lab: project config restored from snapshot");
+  } else {
+    results.config_restored = null; // nothing to restore (seed never ran here)
+  }
+
+  console.error(`lab: teardown complete — ${results.results.length - results.errors.length}/${results.results.length} SQL steps, bucket_deleted=${results.bucket_deleted}, config_restored=${results.config_restored}`);
 
   return results;
 }
@@ -293,10 +436,16 @@ export async function runMatrix(token, ref, opts = {}) {
     "storage_bucket_public",                  // media bucket: public
     "column_grant_exposes_column",           // user_profiles: anon SELECT on email
     "default_privileges_not_revoked",         // future tables to anon
+    // Config-seeded (2026-08-31): these read project CONFIG, not the database, and
+    // had never been exercised against real Supabase. seedLabConfig() PATCHes
+    // /config/auth and /postgrest so they fire for real.
+    "custom_schema_exposed",                  // postgrest db_schema exposes custom_integration
+    "auth_signups_enabled_no_confirm",        // disable_signup=false + mailer_autoconfirm=true
+    "weak_password_policy",                   // password_min_length=6, no required chars
+    "auth_hibp_disabled",                     // password_hibp_enabled=false
+    "no_captcha_on_auth",                     // security_captcha_enabled=false
   ]);
-  const CONFIG_DEPENDENT_CHECKS = new Set([
-    "custom_schema_exposed",                  // requires PostgREST db_schema config (not SQL)
-  ]);
+  const CONFIG_DEPENDENT_CHECKS = new Set([]);
 
   if (beforeFindings.length === 0) {
     throw new Error("lab matrix: seed produced ZERO findings — the fixture is broken.");
@@ -366,7 +515,7 @@ export async function runMatrix(token, ref, opts = {}) {
   // silently widening access (e.g. USAGE+SELECT where only SELECT was captured).
   const preStates = new Map();
   for (const f of beforeFindings) {
-    const state = await captureState(token, ref, f, (q) => dbQuery(token, ref, q));
+    const state = await captureState(token, ref, f, (q) => dbQuery(token, ref, q), { mgmtFn: (m, path) => mgmtRequest(token, m, path) });
     if (state) preStates.set(f.id, state);
   }
 
@@ -407,7 +556,7 @@ export async function runMatrix(token, ref, opts = {}) {
   // Phase 6.5: Capture post-rollback DB state — compare against pre-apply.
   const postStates = new Map();
   for (const f of restoredFindings) {
-    const state = await captureState(token, ref, f, (q) => dbQuery(token, ref, q));
+    const state = await captureState(token, ref, f, (q) => dbQuery(token, ref, q), { mgmtFn: (m, path) => mgmtRequest(token, m, path) });
     if (state) postStates.set(f.id, state);
   }
 

@@ -198,3 +198,28 @@ test("WO-5: no hardcoded multi-privilege GRANT in scripts/checks/ (regression)",
   assert.equal(violations.length, 0,
     `rollback SQL must not contain hardcoded multi-privilege GRANTs:\n${violations.join("\n")}`);
 });
+
+// === no placeholder value may ever be sent to a live project (2026-08-31) ===
+// auth.js PATCHed { security_captcha_secret: "<your_secret>" } into the customer's
+// live auth config and enabled captcha with it — breaking sign-up — while its
+// rollback restored only the `enabled` flag. A fix requiring a value only the
+// operator has is a dashboard action, not an auto-fix.
+
+test("no check emits an angle-bracket placeholder in executable fix content", () => {
+  const files = readdirSync(CHECKS_DIR).filter((f) => f.endsWith(".js"));
+  const placeholder = /"<[a-z_][a-z0-9_]*>"/i;
+  const violations = [];
+  for (const file of files) {
+    const lines = readFileSync(join(CHECKS_DIR, file), "utf8").split("\n");
+    lines.forEach((line, i) => {
+      if (!placeholder.test(line)) return;
+      // A placeholder inside a comment or a dashboard_action string is guidance for a
+      // human and is fine. Anything else would be sent to the project.
+      const t = line.trim();
+      if (t.startsWith("//") || t.startsWith("--") || t.includes("dashboard_action")) return;
+      violations.push(`${file}:${i + 1}: ${t}`);
+    });
+  }
+  assert.equal(violations.length, 0,
+    `placeholder values must never reach a live project:\n${violations.join("\n")}`);
+});
