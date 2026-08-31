@@ -40,11 +40,76 @@ const SENSITIVE_COLUMN_RE = new RegExp(
  * @param {string} [dataType=""] — column data type (optional)
  * @returns {string|null} — classification category (e.g. "email", "cpf") or null
  */
+// Column names are snake_case. Plain SUBSTRING matching on short tokens produced
+// false CRITICALs: `accepted_at` classified as an address (via "cep"),
+// `cancelled_at` as a phone (via "cel"), `accounting_firm` as financial (via
+// "account"). A CRITICAL that is usually wrong trains people to ignore the ones that
+// are right, so the collision-prone SHORT tokens below must match a whole segment.
+// Longer and prefix-style patterns (medic*, address, password) keep substring
+// matching — `medications` must still classify as health.
+const SEGMENT_SEPARATORS = /[^a-z0-9]+/;
+
+// Short tokens that are common substrings of ordinary words. Segment match only.
+const STRICT_SEGMENT_WORDS = {
+  address: ["cep", "state"],
+  phone: ["cel", "cell"],
+  credentials: ["token", "session"],
+  financial: ["account", "card"],
+  government_id: ["ssn", "nid", "govid"],
+};
+
+/** Segments of a name, plus a singular form so `access_tokens` matches "token". */
+function segmentsOf(name) {
+  const segs = String(name).toLowerCase().split(SEGMENT_SEPARATORS).filter(Boolean);
+  const out = new Set(segs);
+  for (const seg of segs) if (seg.endsWith("s") && seg.length > 3) out.add(seg.slice(0, -1));
+  return out;
+}
+
+// Usage-metering counters are not credentials. `input_tokens` / `cached_tokens` /
+// `tokens_cache_read` are LLM accounting columns; `access_token` is a secret. Name
+// alone cannot separate them, so the counter vocabulary is listed explicitly.
+const TOKEN_COUNTER_WORDS = new Set([
+  "input", "output", "cached", "cache", "total", "count", "usage", "prompt", "completion", "read", "write",
+]);
+
+function isTokenCounter(name) {
+  const segs = String(name).toLowerCase().split(SEGMENT_SEPARATORS).filter(Boolean);
+  if (!segs.some((x) => x === "token" || x === "tokens")) return false;
+  return segs.some((x) => TOKEN_COUNTER_WORDS.has(x));
+}
+
+/**
+ * Classify a single column by name + type heuristic.
+ * @param {string} name — column name (required)
+ * @param {string} [dataType=""] — column data type (optional)
+ * @returns {string|null} — classification category (e.g. "email", "cpf") or null
+ */
 export function classifyColumn(name, dataType = "") {
   if (!name) return null;
-  const combined = `${String(name)} ${String(dataType || "")}`.toLowerCase();
+  const type = String(dataType || "").toLowerCase().trim();
+
+  // A boolean holds one bit — it cannot BE a CPF, an email, a phone number, a token
+  // or an address. `has_password`, `has_medical_certificate` and `*_enabled` flags are
+  // facts ABOUT data, not the data. They may matter, but not as a PII leak.
+  if (/^bool(ean)?$/.test(type)) return null;
+
+  if (isTokenCounter(name)) return null;
+
+  const combined = `${String(name)} ${type}`.toLowerCase();
+  const segs = segmentsOf(`${name} ${type}`);
+
   for (const { name: category, regex } of SENSITIVE_PATTERNS) {
-    if (regex.test(combined)) return category;
+    if (!regex.test(combined)) continue;
+    const strict = STRICT_SEGMENT_WORDS[category];
+    if (!strict) return category;
+    // The category matched — but if it matched ONLY via a collision-prone short
+    // token, require that token to be a whole segment.
+    const withoutStrict = new RegExp(
+      regex.source.split("|").filter((alt) => !strict.includes(alt)).join("|") || "(?!)", "i"
+    );
+    if (withoutStrict.test(combined)) return category;
+    if (strict.some((w) => segs.has(w))) return category;
   }
   return null;
 }

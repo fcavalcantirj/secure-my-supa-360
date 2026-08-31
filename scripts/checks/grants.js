@@ -34,14 +34,27 @@ const INTERNAL_SCHEMA_RE = /^(_pg|pg_toast|pg_temp)/;
 /**
  * Classify a single column-level grant row into a finding (or null).
  *
- * A column-level SELECT grant is a finding when anon or authenticated has
- * SELECT on a specific column. This bypasses table-level checks — a table
- * may appear locked (no table-level SELECT) but still leak individual columns.
+ * A column-level SELECT grant matters ONLY when it bypasses a locked table: the
+ * role can read the column while lacking table-level SELECT. That is the whole
+ * point of this check.
  *
- * Severity:
- * - critical: sensitive column (PII/credentials) exposed to anon/auth
- * - high: non-sensitive column where table-level SELECT is denied (true bypass)
- * - medium: non-sensitive column where table-level is already granted (redundant)
+ * CRITICAL SEMANTICS — has_column_privilege() returns TRUE whenever the role holds
+ * a TABLE-level grant (PostgreSQL: a table grant implies every column). So
+ * `*_col_select` alone does NOT mean "a column-level grant exists". Treating it as
+ * such made this check emit one finding per readable column of every readable table:
+ * on a real project, 160 of 160 CRITICALs were tables the role could already read
+ * in full, and each shipped a `REVOKE SELECT(col)` fix that is a documented no-op
+ * while the table grant stands. Zero were the bypass this check exists to find.
+ *
+ * The bypass test is per ROLE: colPriv && !tablePriv. It must NOT be computed as
+ * `anonTable || authTable` — an `authenticated` table grant would then mask a real
+ * `anon` column-level bypass, which is a false negative in the dangerous direction.
+ *
+ * Severity (bypass cases only):
+ * - critical: sensitive column (PII/credentials) readable while the table is locked
+ * - high: non-sensitive column readable while the table is locked
+ * Columns already covered by a table-level grant are NOT reported here — that
+ * exposure belongs to the RLS/table-grant checks, which evaluate row policies.
  *
  * @param {object} row — {
  *   schema_name, table_name, column_name, data_type,
@@ -58,24 +71,23 @@ export function classifyColumnGrant(row) {
 
   const anonTable = !!row.anon_table_select;
   const authTable = !!row.auth_table_select;
-  const tableLevelGranted = anonTable || authTable;
+
+  // Per-role bypass: the role can read this column WITHOUT table-level SELECT.
+  // Evaluated per role on purpose — see the header note on false negatives.
+  const anonBypass = anonCol && !anonTable;
+  const authBypass = authCol && !authTable;
 
   const roles = [];
-  if (anonCol) roles.push("anon");
-  if (authCol) roles.push("authenticated");
+  if (anonBypass) roles.push("anon");
+  if (authBypass) roles.push("authenticated");
+
+  // No bypass for any role => the column is readable only because the TABLE is
+  // readable. Revoking the column grant would be a no-op, and the exposure is the
+  // table-grant/RLS checks' to report. Staying silent here keeps CRITICAL meaningful.
+  if (roles.length === 0) return null;
 
   const sensitive = isSensitiveColumn(row.column_name, row.data_type);
-
-  let severity;
-  if (sensitive) {
-    severity = "critical";
-  } else if (!tableLevelGranted) {
-    severity = "high"; // column grant bypasses table-level lock
-  } else {
-    return null; // redundant — table-level access already granted, column-level adds no risk
-  }
-
-  if (roles.length === 0) return null;
+  const severity = sensitive ? "critical" : "high";
 
   return {
     check: "column_grant_exposes_column",
@@ -89,9 +101,18 @@ export function classifyColumnGrant(row) {
       column_name: row.column_name,
       data_type: row.data_type,
       roles_exposed: roles,
-      table_level_select: tableLevelGranted,
+      // Always false now, and kept for report/consumer compatibility: a role is only
+      // reported here when it LACKS table-level SELECT. Read the per-role fields below
+      // for the full picture (another role may well hold the table grant).
+      table_level_select: false,
+      // Per-role privileges, so a reader can falsify this finding without re-querying.
+      anon_column_select: anonCol,
+      anon_table_select: anonTable,
+      authenticated_column_select: authCol,
+      authenticated_table_select: authTable,
       column_level_select: true,
       sensitive,
+      reason: `${roles.join(" + ")} can SELECT this column while lacking table-level SELECT on ${row.schema_name}.${row.table_name} — a column grant bypassing the table lock`,
     },
     fix: {
       sql: [

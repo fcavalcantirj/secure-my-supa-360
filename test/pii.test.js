@@ -188,3 +188,54 @@ test("PII escalation: confirmed leak of sensitive column -> critical", async () 
   assert.ok(f.evidence.sensitive_columns.some((c) => c.name === "email" && c.classification === "email"));
   assert.ok(f.evidence.sensitive_columns.some((c) => c.name === "cpf" && c.classification === "cpf"));
 });
+
+// === substring false positives (2026-08-31) ===
+// Plain substring matching classified ordinary columns as PII, inflating CRITICAL.
+// On one real project 160/160 column-grant CRITICALs were sensitive-classified, and a
+// large share came from matches like these. A CRITICAL that is usually wrong is worse
+// than no CRITICAL: it teaches the reader to skip the ones that are right.
+
+test("classifyColumn: short tokens must match a whole segment, not any substring", () => {
+  // "cep" inside "accepted", "cel" inside "cancelled", "account" inside "accounting"
+  assert.equal(classifyColumn("accepted_at"), null);
+  assert.equal(classifyColumn("terms_accepted_at"), null);
+  assert.equal(classifyColumn("accepter_name"), null);
+  assert.equal(classifyColumn("cancelled_at"), null);
+  assert.equal(classifyColumn("cancelled_consultations"), null);
+  assert.equal(classifyColumn("accounting_firm"), null);
+});
+
+test("classifyColumn: the same short tokens DO match as real segments", () => {
+  assert.equal(classifyColumn("cep"), "address");
+  assert.equal(classifyColumn("source_zip"), "address");
+  assert.equal(classifyColumn("bank_account"), "financial");
+  assert.equal(classifyColumn("card_number"), "financial");
+  assert.equal(classifyColumn("access_token"), "credentials");
+  assert.equal(classifyColumn("session_token"), "credentials");
+});
+
+test("classifyColumn: LLM usage counters are not credentials", () => {
+  for (const c of ["input_tokens", "output_tokens", "cached_tokens",
+                   "tokens_cache_read", "tokens_cache_write", "total_tokens"]) {
+    assert.equal(classifyColumn(c), null, `${c} is a usage counter, not a secret`);
+  }
+  // ...but a real token still is one
+  assert.equal(classifyColumn("worker_token"), "credentials");
+  assert.equal(classifyColumn("share_token"), "credentials");
+});
+
+test("classifyColumn: a boolean cannot BE the sensitive value", () => {
+  assert.equal(classifyColumn("has_password", "boolean"), null);
+  assert.equal(classifyColumn("has_medical_certificate", "boolean"), null);
+  assert.equal(classifyColumn("nr1_health_module_enabled", "boolean"), null);
+  // the same names on a text column stay sensitive
+  assert.equal(classifyColumn("password", "text"), "credentials");
+  assert.equal(classifyColumn("medical_record", "text"), "health");
+});
+
+test("classifyColumn: multi-word and prefix patterns still work", () => {
+  assert.equal(classifyColumn("e_mail"), "email");
+  assert.equal(classifyColumn("social_security"), "government_id");
+  assert.equal(classifyColumn("medications"), "health");
+  assert.equal(classifyColumn("prescription_pdfs"), "health");
+});
